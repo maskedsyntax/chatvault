@@ -3,7 +3,7 @@ import SwiftData
 
 enum ModelContainerFactory {
     static func make() throws -> ModelContainer {
-        let schema = Schema([ChatArchive.self, ChatMessage.self])
+        let schema = Schema([ChatArchive.self, ChatMessage.self, ChatParticipant.self])
         let storeURL = try resolveStoreURL()
         let configuration = ModelConfiguration(schema: schema, url: storeURL)
 

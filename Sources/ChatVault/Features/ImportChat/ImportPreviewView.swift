@@ -36,6 +36,7 @@ struct ImportPreviewView: View {
     let onImport: (ChatArchive) -> Void
 
     @State private var title: String
+    @State private var participants: [ImportParticipantDraft]
     @State private var isImporting = false
     @State private var importError: Error?
     @State private var showWarnings = false
@@ -50,7 +51,24 @@ struct ImportPreviewView: View {
         self.mode = mode
         self.possibleDuplicate = possibleDuplicate
         self.onImport = onImport
-        _title = State(initialValue: parsedImport.suggestedTitle)
+
+        if case .reimport(let archive) = mode, !archive.participantRecords.isEmpty {
+            _title = State(initialValue: archive.title)
+            _participants = State(initialValue: archive.participantRecords.map {
+                ImportParticipantDraft(
+                    exportName: $0.exportName,
+                    displayName: $0.displayName,
+                    isMe: $0.isMe,
+                    birthdayMonth: $0.birthdayMonth,
+                    birthdayDay: $0.birthdayDay,
+                    birthdayNote: $0.birthdayNote
+                )
+            })
+        } else {
+            let setup = parsedImport.importSetup
+            _title = State(initialValue: setup.suggestedTitle)
+            _participants = State(initialValue: setup.participantDrafts)
+        }
     }
 
     private var parsed: ParsedChat { parsedImport.parsed }
@@ -141,6 +159,14 @@ struct ImportPreviewView: View {
                     TextField("Title", text: $title)
                 }
 
+                if !participants.isEmpty {
+                    ParticipantEditorSection(
+                        participants: $participants,
+                        title: $title,
+                        fallbackTitle: parsedImport.importSetup.suggestedTitle
+                    )
+                }
+
                 Section("Summary") {
                     LabeledContent("Messages", value: "\(parsed.messages.count)")
                     LabeledContent("Participants", value: "\(parsed.participants.count)")
@@ -153,10 +179,10 @@ struct ImportPreviewView: View {
                     if parsed.attachedMediaCount > 0 {
                         LabeledContent("Linked Attachments", value: "\(parsed.attachedMediaCount)")
                     }
-                    if parsed.messages.contains(where: \.isDeletedMessage) {
+                    if participants.contains(where: { $0.birthdayMonth != nil }) {
                         LabeledContent(
-                            "Deleted Messages",
-                            value: "\(parsed.messages.filter(\.isDeletedMessage).count)"
+                            "Birthdays Detected",
+                            value: "\(participants.filter { $0.birthdayMonth != nil }.count)"
                         )
                     }
                 }
@@ -166,13 +192,6 @@ struct ImportPreviewView: View {
                         Label("Large chat — import may take a moment.", systemImage: "clock")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                    }
-                }
-
-                if !parsed.participants.isEmpty {
-                    Section("Participants") {
-                        Text(parsed.participants.joined(separator: ", "))
-                            .font(.subheadline)
                     }
                 }
 
@@ -219,7 +238,7 @@ struct ImportPreviewView: View {
                 }
             }
         }
-        .frame(minWidth: 480, minHeight: 520)
+        .frame(minWidth: 480, minHeight: 560)
     }
 
     private func sampleText(for message: ParsedMessage) -> String {
@@ -234,6 +253,8 @@ struct ImportPreviewView: View {
         isImporting = true
         importError = nil
 
+        let configuration = ImportConfiguration(title: trimmedTitle, participants: participants)
+
         Task {
             do {
                 let archive: ChatArchive
@@ -242,12 +263,12 @@ struct ImportPreviewView: View {
                     archive = try chatStore.reimportArchive(
                         existing,
                         from: parsedImport,
-                        title: trimmedTitle
+                        configuration: configuration
                     )
                 case .newImport, .batch:
                     archive = try chatStore.saveArchive(
                         from: parsedImport,
-                        title: trimmedTitle
+                        configuration: configuration
                     )
                 }
                 isImporting = false

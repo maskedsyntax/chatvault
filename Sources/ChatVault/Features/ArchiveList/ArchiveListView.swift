@@ -278,6 +278,7 @@ struct ArchiveListView: View {
             selectedArchive = nil
         }
         chatStore?.deleteArchiveFiles(for: archive)
+        try? chatStore?.deleteSearchIndex(for: archive)
         modelContext.delete(archive)
         try? modelContext.save()
     }

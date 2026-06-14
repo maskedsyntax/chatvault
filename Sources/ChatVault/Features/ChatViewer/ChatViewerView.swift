@@ -60,6 +60,8 @@ struct ChatViewerView: View {
     @State private var showMediaInspector = false
     @State private var highlightedMessageID: UUID?
     @State private var scrollCoordinator = MessageScrollCoordinator()
+    @State private var showDateJump = false
+    @State private var messageDays: [MessageDaySummary] = []
 
     init(archive: ChatArchive, selectedArchive: Binding<ChatArchive?>) {
         self.archive = archive
@@ -126,6 +128,13 @@ struct ChatViewerView: View {
             if !scrollCoordinator.isSearching, scrollCoordinator.messageCount > 20 {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button {
+                        showDateJump = true
+                    } label: {
+                        Image(systemName: "calendar")
+                    }
+                    .help("Jump to Date")
+
+                    Button {
                         scrollCoordinator.scrollToTop()
                     } label: {
                         Image(systemName: "arrow.up.to.line")
@@ -178,6 +187,21 @@ struct ChatViewerView: View {
         .sheet(isPresented: $showArchiveDetails) {
             ArchiveDetailsView(archive: archive, selectedArchive: $selectedArchive)
         }
+        .sheet(isPresented: $showDateJump) {
+            DateJumpView(days: messageDays) { day in
+                scrollCoordinator.scrollToMessage(day.firstMessageID)
+                highlight(day.firstMessageID)
+            }
+        }
+        .task(id: archive.id) {
+            try? chatStore?.ensureParticipantRecords(for: archive)
+        }
+        .task(id: archive.id) {
+            if let chatStore {
+                try? chatStore.rebuildSearchIndexIfNeeded(for: archive)
+                messageDays = (try? chatStore.messageDays(for: archive)) ?? []
+            }
+        }
         .onChange(of: searchText) { _, newValue in
             scrollCoordinator.isSearching = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             scrollCoordinator.searchResultIndex = 0
@@ -196,25 +220,43 @@ struct ChatViewerView: View {
 }
 
 struct ChatLayout {
+    let archive: ChatArchive
     let isGroupChat: Bool
     let rightAlignedSender: String?
+    private let displayNames: [String: String]
 
     init(archive: ChatArchive) {
-        let participants = archive.participants
-        if participants.count == 2 {
-            isGroupChat = false
-            if let contact = participants.first(where: { archive.title.localizedCaseInsensitiveContains($0) }) {
-                rightAlignedSender = participants.first(where: { $0 != contact })
-            } else {
-                rightAlignedSender = participants.last
-            }
-        } else if participants.count > 2 {
-            isGroupChat = true
-            rightAlignedSender = nil
+        self.archive = archive
+
+        if !archive.participantRecords.isEmpty {
+            isGroupChat = archive.isGroupChat
+            rightAlignedSender = archive.myParticipant?.exportName
+            displayNames = Dictionary(
+                uniqueKeysWithValues: archive.participantRecords.map { ($0.exportName, $0.resolvedName) }
+            )
         } else {
-            isGroupChat = false
-            rightAlignedSender = nil
+            let participants = archive.participants
+            if participants.count == 2 {
+                isGroupChat = false
+                if let contact = participants.first(where: { archive.title.localizedCaseInsensitiveContains($0) }) {
+                    rightAlignedSender = participants.first(where: { $0 != contact })
+                } else {
+                    rightAlignedSender = participants.last
+                }
+            } else if participants.count > 2 {
+                isGroupChat = true
+                rightAlignedSender = nil
+            } else {
+                isGroupChat = false
+                rightAlignedSender = nil
+            }
+            displayNames = Dictionary(uniqueKeysWithValues: participants.map { ($0, $0) })
         }
+    }
+
+    func displayName(for exportName: String?) -> String? {
+        guard let exportName else { return nil }
+        return displayNames[exportName] ?? exportName
     }
 
     func isRightAligned(_ message: ChatMessage) -> Bool {
@@ -225,7 +267,7 @@ struct ChatLayout {
     }
 
     func shouldShowSenderName(_ message: ChatMessage, isRightAligned: Bool) -> Bool {
-        isGroupChat && !isRightAligned && message.senderName != nil
+        (isGroupChat || archive.participantRecords.count > 2) && !isRightAligned && message.senderName != nil
     }
 }
 
@@ -245,10 +287,13 @@ struct MessageListView: View {
 
     @Query private var allMessages: [ChatMessage]
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.chatStore) private var chatStore
 
     @State private var hasScrolledToBottomOnAppear = false
     @State private var cachedSections: [MessageSection] = []
     @State private var filteredMessages: [ChatMessage] = []
+    @State private var searchMatchIDs: Set<UUID>?
+    @State private var searchTask: Task<Void, Never>?
 
     init(
         archive: ChatArchive,
@@ -343,9 +388,8 @@ struct MessageListView: View {
                 scrollCoordinator.updateSearchResults(filteredMessages.map(\.id))
             }
             .onChange(of: searchText) { oldValue, newValue in
-                rebuildCache()
+                scheduleSearch(for: newValue)
                 scrollCoordinator.isSearching = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                scrollCoordinator.updateSearchResults(filteredMessages.map(\.id))
                 if oldValue.isEmpty && !newValue.isEmpty {
                     hasScrolledToBottomOnAppear = true
                 }
@@ -365,13 +409,53 @@ struct MessageListView: View {
         let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             filteredMessages = allMessages
+        } else if let searchMatchIDs {
+            filteredMessages = allMessages.filter { searchMatchIDs.contains($0.id) }
         } else {
-            filteredMessages = allMessages.filter { message in
-                message.body.localizedStandardContains(trimmed) ||
-                (message.senderName?.localizedStandardContains(trimmed) ?? false)
-            }
+            filteredMessages = []
         }
         cachedSections = Self.buildSections(from: filteredMessages)
+    }
+
+    private func scheduleSearch(for query: String) {
+        searchTask?.cancel()
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmed.isEmpty {
+            searchMatchIDs = nil
+            rebuildCache()
+            scrollCoordinator.updateSearchResults(filteredMessages.map(\.id))
+            return
+        }
+
+        searchTask = Task {
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled else { return }
+
+            if let chatStore {
+                if let ids = try? chatStore.searchMessages(in: archive, query: trimmed) {
+                    guard !Task.isCancelled else { return }
+                    searchMatchIDs = Set(ids)
+                } else {
+                    searchMatchIDs = Set(
+                        allMessages.filter {
+                            $0.body.localizedStandardContains(trimmed) ||
+                            ($0.senderName?.localizedStandardContains(trimmed) ?? false)
+                        }.map(\.id)
+                    )
+                }
+            } else {
+                searchMatchIDs = Set(
+                    allMessages.filter {
+                        $0.body.localizedStandardContains(trimmed) ||
+                        ($0.senderName?.localizedStandardContains(trimmed) ?? false)
+                    }.map(\.id)
+                )
+            }
+
+            rebuildCache()
+            scrollCoordinator.updateSearchResults(filteredMessages.map(\.id))
+        }
     }
 
     private static func buildSections(from messages: [ChatMessage]) -> [MessageSection] {
@@ -455,7 +539,7 @@ struct MessageRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     if chatLayout.shouldShowSenderName(message, isRightAligned: isRightAligned),
                        let sender = message.senderName {
-                        Text(sender)
+                        Text(chatLayout.displayName(for: sender) ?? sender)
                             .font(.caption)
                             .fontWeight(.semibold)
                             .foregroundStyle(ParticipantColor.color(for: sender))

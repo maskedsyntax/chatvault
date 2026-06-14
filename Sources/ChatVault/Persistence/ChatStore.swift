@@ -26,6 +26,10 @@ public final class ChatStore {
             guard let extractedBundleURL else { return }
             try? FileManager.default.removeItem(at: extractedBundleURL)
         }
+
+        public var importSetup: ChatTitleSuggester.ImportSetup {
+            ChatTitleSuggester.buildImportSetup(fileName: sourceFileName, parsed: parsed)
+        }
     }
 
     public func parseImport(from url: URL) async throws -> ParsedImport {
@@ -65,11 +69,16 @@ public final class ChatStore {
         let data = try readData(from: url)
         let (text, encodingName) = try Self.decodeText(from: data)
         let parsedChat = try parseText(text, sourceName: url.lastPathComponent)
-        let suggestedTitle = url.deletingPathExtension().lastPathComponent
+        _ = url.deletingPathExtension().lastPathComponent
+
+        let setup = ChatTitleSuggester.buildImportSetup(
+            fileName: url.lastPathComponent,
+            parsed: parsedChat
+        )
 
         return ParsedImport(
             parsed: parsedChat,
-            suggestedTitle: suggestedTitle,
+            suggestedTitle: setup.suggestedTitle,
             sourceFileName: url.lastPathComponent,
             encodingName: encodingName,
             extractedBundleURL: nil,
@@ -89,13 +98,18 @@ public final class ChatStore {
             let data = try readData(from: chatFileURL)
             let (text, encodingName) = try Self.decodeText(from: data)
             let parsedChat = try parseText(text, sourceName: chatFileURL.lastPathComponent)
-            let suggestedTitle = url.deletingPathExtension().lastPathComponent
+            _ = url.deletingPathExtension().lastPathComponent
                 .replacingOccurrences(of: "WhatsApp Chat with ", with: "")
                 .replacingOccurrences(of: "WhatsApp Chat - ", with: "")
 
+            let setup = ChatTitleSuggester.buildImportSetup(
+                fileName: url.lastPathComponent,
+                parsed: parsedChat
+            )
+
             return ParsedImport(
                 parsed: parsedChat,
-                suggestedTitle: suggestedTitle,
+                suggestedTitle: setup.suggestedTitle,
                 sourceFileName: url.lastPathComponent,
                 encodingName: encodingName,
                 extractedBundleURL: tempDirectory,
@@ -119,8 +133,8 @@ public final class ChatStore {
     }
 
     @discardableResult
-    public func saveArchive(from parsedImport: ParsedImport, title: String) throws -> ChatArchive {
-        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    public func saveArchive(from parsedImport: ParsedImport, configuration: ImportConfiguration) throws -> ChatArchive {
+        let trimmedTitle = configuration.title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTitle.isEmpty else { throw ImportError.invalidTitle }
 
         let archiveID = UUID()
@@ -133,20 +147,84 @@ public final class ChatStore {
             mediaCount = ArchiveStorage.mediaCount(in: permanentURL)
         }
 
+        let participantNames = configuration.participants.map(\.exportName)
         let archive = ChatArchive(
             id: archiveID,
             title: trimmedTitle,
             sourceFileName: parsedImport.sourceFileName,
             messageCount: parsedImport.parsed.messages.count,
-            participants: parsedImport.parsed.participants,
+            participants: participantNames,
             lastMessageDate: parsedImport.parsed.messages.last?.timestamp,
             storageDirectory: storagePath,
             mediaFileCount: mediaCount
         )
 
         modelContext.insert(archive)
-        try insertMessages(parsedImport.parsed.messages, into: archive)
+        let insertedMessages = try insertMessages(parsedImport.parsed.messages, into: archive)
+        try applyParticipants(configuration.participants, to: archive)
         try modelContext.save()
+        try rebuildSearchIndex(for: archive.id, messages: insertedMessages)
+        return archive
+    }
+
+    @discardableResult
+    public func saveArchive(from parsedImport: ParsedImport, title: String) throws -> ChatArchive {
+        let setup = parsedImport.importSetup
+        let configuration = ImportConfiguration(
+            title: title,
+            participants: setup.participantDrafts
+        )
+        return try saveArchive(from: parsedImport, configuration: configuration)
+    }
+
+    @discardableResult
+    public func reimportArchive(
+        _ archive: ChatArchive,
+        from parsedImport: ParsedImport,
+        configuration: ImportConfiguration
+    ) throws -> ChatArchive {
+        let trimmedTitle = configuration.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { throw ImportError.invalidTitle }
+        archive.title = trimmedTitle
+
+        deleteArchiveFiles(for: archive)
+        try deleteSearchIndex(for: archive)
+
+        let existingMessages = try fetchMessages(for: archive.id)
+        for message in existingMessages {
+            modelContext.delete(message)
+        }
+        archive.messages.removeAll()
+
+        for participant in archive.participantRecords {
+            modelContext.delete(participant)
+        }
+        archive.participantRecords.removeAll()
+
+        var storagePath: String?
+        var mediaCount = parsedImport.mediaFileCount
+
+        if let temporaryBundleURL = parsedImport.extractedBundleURL {
+            let permanentURL = try ArchiveStorage.moveTemporaryBundle(from: temporaryBundleURL, to: archive.id)
+            storagePath = permanentURL.path
+            mediaCount = ArchiveStorage.mediaCount(in: permanentURL)
+        } else {
+            storagePath = nil
+        }
+
+        archive.sourceFileName = parsedImport.sourceFileName
+        archive.messageCount = parsedImport.parsed.messages.count
+        archive.participants = configuration.participants.map(\.exportName)
+        archive.lastMessageDate = parsedImport.parsed.messages.last?.timestamp
+        archive.storageDirectory = storagePath
+        archive.mediaFileCount = mediaCount
+        archive.updatedAt = Date()
+
+        try insertMessages(parsedImport.parsed.messages, into: archive)
+        try applyParticipants(configuration.participants, to: archive)
+        try modelContext.save()
+        let insertedMessages = try fetchMessages(for: archive.id)
+        try rebuildSearchIndex(for: archive.id, messages: insertedMessages)
         return archive
     }
 
@@ -156,39 +234,12 @@ public final class ChatStore {
         from parsedImport: ParsedImport,
         title: String? = nil
     ) throws -> ChatArchive {
-        if let title {
-            let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedTitle.isEmpty else { throw ImportError.invalidTitle }
-            archive.title = trimmedTitle
-        }
-
-        deleteArchiveFiles(for: archive)
-
-        for message in archive.messages {
-            modelContext.delete(message)
-        }
-        archive.messages.removeAll()
-
-        var storagePath: String?
-        var mediaCount = parsedImport.mediaFileCount
-
-        if let temporaryBundleURL = parsedImport.extractedBundleURL {
-            let permanentURL = try ArchiveStorage.moveTemporaryBundle(from: temporaryBundleURL, to: archive.id)
-            storagePath = permanentURL.path
-            mediaCount = ArchiveStorage.mediaCount(in: permanentURL)
-        }
-
-        archive.sourceFileName = parsedImport.sourceFileName
-        archive.messageCount = parsedImport.parsed.messages.count
-        archive.participants = parsedImport.parsed.participants
-        archive.lastMessageDate = parsedImport.parsed.messages.last?.timestamp
-        archive.storageDirectory = storagePath
-        archive.mediaFileCount = mediaCount
-        archive.updatedAt = Date()
-
-        try insertMessages(parsedImport.parsed.messages, into: archive)
-        try modelContext.save()
-        return archive
+        let setup = parsedImport.importSetup
+        let configuration = ImportConfiguration(
+            title: title ?? archive.title,
+            participants: setup.participantDrafts
+        )
+        return try reimportArchive(archive, from: parsedImport, configuration: configuration)
     }
 
     @discardableResult
@@ -208,7 +259,9 @@ public final class ChatStore {
         return try saveArchive(from: importValue, title: title)
     }
 
-    private func insertMessages(_ parsedMessages: [ParsedMessage], into archive: ChatArchive) throws {
+    @discardableResult
+    private func insertMessages(_ parsedMessages: [ParsedMessage], into archive: ChatArchive) throws -> [ChatMessage] {
+        var inserted: [ChatMessage] = []
         for (index, msg) in parsedMessages.enumerated() {
             let chatMessage = ChatMessage(
                 senderName: msg.senderName,
@@ -224,11 +277,13 @@ public final class ChatStore {
             )
             chatMessage.chatArchive = archive
             modelContext.insert(chatMessage)
+            inserted.append(chatMessage)
 
             if (index + 1) % Self.messageBatchSize == 0 {
                 try modelContext.save()
             }
         }
+        return inserted
     }
 
     public func findPossibleDuplicate(sourceFileName: String, messageCount: Int) -> ChatArchive? {
@@ -244,6 +299,123 @@ public final class ChatStore {
 
     public func deleteArchiveFiles(for archive: ChatArchive) {
         ArchiveStorage.deleteBundle(at: archive.storageDirectory)
+    }
+
+    public func deleteSearchIndex(for archive: ChatArchive) throws {
+        try MessageSearchIndex.shared.deleteIndex(for: archive.id)
+    }
+
+    public func ensureParticipantRecords(for archive: ChatArchive) throws {
+        guard archive.participantRecords.isEmpty, !archive.participants.isEmpty else { return }
+
+        for name in archive.participants {
+            let participant = ChatParticipant(
+                exportName: name,
+                displayName: name
+            )
+            participant.chatArchive = archive
+            modelContext.insert(participant)
+        }
+        try modelContext.save()
+    }
+
+    public func searchMessages(in archive: ChatArchive, query: String) throws -> [UUID] {
+        try MessageSearchIndex.shared.search(archiveID: archive.id, query: query)
+    }
+
+    public func messageDays(for archive: ChatArchive) throws -> [MessageDaySummary] {
+        try MessageSearchIndex.shared.messageDays(for: archive.id)
+    }
+
+    public func birthdaysToday() -> [BirthdayReminder] {
+        let descriptor = FetchDescriptor<ChatParticipant>()
+        guard let participants = try? modelContext.fetch(descriptor) else { return [] }
+
+        return participants.compactMap { participant in
+            guard !participant.isMe,
+                  participant.birthdayMatchesToday(),
+                  let archive = participant.chatArchive else { return nil }
+            return BirthdayReminder(
+                personName: participant.resolvedName,
+                archiveID: archive.id,
+                archiveTitle: archive.title,
+                birthdayNote: participant.birthdayNote
+            )
+        }
+        .sorted { $0.personName.localizedStandardCompare($1.personName) == .orderedAscending }
+    }
+
+    public func rescanBirthdays(for archive: ChatArchive) throws {
+        let messages = try fetchMessages(for: archive.id)
+        let parsedMessages = messages.map(Self.parsedMessage(from:))
+        let birthdays = BirthdayExtractor.extract(from: parsedMessages, participants: archive.participants)
+
+        for participant in archive.participantRecords {
+            if let match = birthdays[participant.exportName] {
+                participant.birthdayMonth = match.month
+                participant.birthdayDay = match.day
+                participant.birthdayNote = match.note
+            }
+        }
+        archive.updatedAt = Date()
+        try modelContext.save()
+    }
+
+    private func applyParticipants(_ drafts: [ImportParticipantDraft], to archive: ChatArchive) throws {
+        for draft in drafts {
+            let participant = ChatParticipant(
+                exportName: draft.exportName,
+                displayName: draft.displayName,
+                isMe: draft.isMe,
+                birthdayMonth: draft.birthdayMonth,
+                birthdayDay: draft.birthdayDay,
+                birthdayNote: draft.birthdayNote
+            )
+            participant.chatArchive = archive
+            modelContext.insert(participant)
+        }
+    }
+
+    public func rebuildSearchIndexIfNeeded(for archive: ChatArchive) throws {
+        let existingDays = try MessageSearchIndex.shared.messageDays(for: archive.id)
+        guard existingDays.isEmpty, archive.messageCount > 0 else { return }
+        let messages = try fetchMessages(for: archive.id)
+        try rebuildSearchIndex(for: archive.id, messages: messages)
+    }
+    private func rebuildSearchIndex(for archiveID: UUID, messages: [ChatMessage]) throws {
+        let indexedMessages = messages.map { message in
+            MessageSearchIndex.IndexedMessage(
+                id: message.id,
+                body: message.body,
+                senderName: message.senderName,
+                timestamp: message.timestamp
+            )
+        }
+        try MessageSearchIndex.shared.rebuildIndex(archiveID: archiveID, messages: indexedMessages)
+    }
+
+    private func fetchMessages(for archiveID: UUID) throws -> [ChatMessage] {
+        let descriptor = FetchDescriptor<ChatMessage>(
+            predicate: #Predicate<ChatMessage> { message in
+                message.chatArchive?.id == archiveID
+            },
+            sortBy: [SortDescriptor(\.sequenceIndex, order: .forward)]
+        )
+        return try modelContext.fetch(descriptor)
+    }
+
+    private static func parsedMessage(from message: ChatMessage) -> ParsedMessage {
+        ParsedMessage(
+            timestamp: message.timestamp,
+            senderName: message.senderName,
+            body: message.body,
+            isSystemMessage: message.isSystemMessage,
+            isMediaPlaceholder: message.isMediaPlaceholder,
+            isDeletedMessage: message.isDeletedMessage,
+            mediaFileName: message.mediaFileName,
+            mediaType: message.mediaType,
+            rawText: message.rawText
+        )
     }
 
     public func firstMessageDate(for archive: ChatArchive) -> Date? {

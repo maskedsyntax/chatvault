@@ -38,11 +38,31 @@ struct ArchiveDetailsView: View {
                     LabeledContent("Last Message", value: formattedLastDate)
                 }
 
-                if !archive.participants.isEmpty {
-                    Section("Participants (\(archive.participants.count))") {
+                if !archive.participantRecords.isEmpty {
+                    Section {
+                        ForEach(archive.participantRecords.sorted(by: { $0.resolvedName < $1.resolvedName }), id: \.id) { participant in
+                            ParticipantDetailRow(participant: participant, archive: archive) {
+                                try? modelContext.save()
+                                archive.updatedAt = Date()
+                            }
+                        }
+
+                        Button("Scan Chat for Birthdays") {
+                            try? chatStore?.rescanBirthdays(for: archive)
+                        }
+                    } header: {
+                        Text("People")
+                    } footer: {
+                        Text("Display names appear in the chat viewer. Birthdays are detected from messages mentioning dates.")
+                            .font(.caption)
+                    }
+                } else if !archive.participants.isEmpty {
+                    Section {
                         ForEach(archive.participants, id: \.self) { participant in
                             Text(participant)
                         }
+                    } header: {
+                        Text("Participants (\(archive.participants.count))")
                     }
                 }
 
@@ -121,6 +141,7 @@ struct ArchiveDetailsView: View {
                         selectedArchive = nil
                     }
                     chatStore?.deleteArchiveFiles(for: archive)
+                    try? chatStore?.deleteSearchIndex(for: archive)
                     modelContext.delete(archive)
                     try? modelContext.save()
                     dismiss()
@@ -128,6 +149,9 @@ struct ArchiveDetailsView: View {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("\"\(archive.title)\" and all \(archive.messageCount) messages will be permanently deleted.")
+            }
+            .task {
+                try? chatStore?.ensureParticipantRecords(for: archive)
             }
         }
         .frame(minWidth: 400, minHeight: 480)
@@ -182,5 +206,45 @@ struct ArchiveDetailsView: View {
     private func cancelReimport() {
         reimportPreview?.cleanupTemporaryFiles()
         reimportPreview = nil
+    }
+}
+
+private struct ParticipantDetailRow: View {
+    @Bindable var participant: ChatParticipant
+    let archive: ChatArchive
+    let onSave: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Display name", text: $participant.displayName)
+                .onSubmit { onSave() }
+
+            Toggle("This is me", isOn: $participant.isMe)
+                .onChange(of: participant.isMe) { _, isMe in
+                    if isMe {
+                        for other in archive.participantRecords where other.id != participant.id {
+                            other.isMe = false
+                        }
+                    }
+                    onSave()
+                }
+
+            Text("Export name: \(participant.exportName)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let birthday = participant.formattedBirthday {
+                Label(birthday, systemImage: "birthday.cake")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let note = participant.birthdayNote {
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(2)
+                }
+            }
+        }
+        .padding(.vertical, 4)
     }
 }

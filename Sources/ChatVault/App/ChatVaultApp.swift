@@ -50,6 +50,7 @@ struct ContentView: View {
 
     @State private var chatStore: ChatStore?
     @State private var selectedArchive: ChatArchive?
+    @State private var birthdayReminders: [BirthdayReminder] = []
 
     var body: some View {
         NavigationSplitView {
@@ -63,6 +64,12 @@ struct ContentView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 12)
                 .padding(.bottom, 8)
+
+                BirthdaysTodayView(reminders: birthdayReminders) { reminder in
+                    if let archive = archives.first(where: { $0.id == reminder.archiveID }) {
+                        selectedArchive = archive
+                    }
+                }
 
                 ArchiveListView(selectedArchive: $selectedArchive)
             }
@@ -79,8 +86,16 @@ struct ContentView: View {
             if chatStore == nil {
                 chatStore = ChatStore(modelContext: modelContext)
             }
+            refreshBirthdays()
+        }
+        .onChange(of: archives.count) { _, _ in
+            refreshBirthdays()
         }
         .environment(\.chatStore, chatStore)
+    }
+
+    private func refreshBirthdays() {
+        birthdayReminders = chatStore?.birthdaysToday() ?? []
     }
 }
 

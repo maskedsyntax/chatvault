@@ -6,7 +6,7 @@ import SwiftData
 final class ChatStoreTests: XCTestCase {
     private func makeStore() throws -> (ChatStore, ModelContainer) {
         let container = try ModelContainer(
-            for: ChatArchive.self, ChatMessage.self,
+            for: ChatArchive.self, ChatMessage.self, ChatParticipant.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
         let store = ChatStore(modelContext: container.mainContext)
@@ -87,8 +87,12 @@ final class ChatStoreTests: XCTestCase {
             extractedBundleURL: nil,
             mediaFileCount: 0
         )
+        let configuration = ImportConfiguration(
+            title: "Chat",
+            participants: importValue.importSetup.participantDrafts
+        )
 
-        let reimported = try store.reimportArchive(archive, from: importValue)
+        let reimported = try store.reimportArchive(archive, from: importValue, configuration: configuration)
 
         XCTAssertEqual(reimported.id, archive.id)
         XCTAssertEqual(reimported.messageCount, 2)

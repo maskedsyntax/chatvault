@@ -9,6 +9,7 @@ public final class ChatMessage {
     public var timestamp: Date?
     public var isSystemMessage: Bool
     public var isMediaPlaceholder: Bool
+    public var isDeletedMessage: Bool = false
     public var mediaFileName: String?
     public var mediaTypeRaw: String?
     public var rawText: String
@@ -23,6 +24,7 @@ public final class ChatMessage {
         timestamp: Date? = nil,
         isSystemMessage: Bool = false,
         isMediaPlaceholder: Bool = false,
+        isDeletedMessage: Bool = false,
         mediaFileName: String? = nil,
         mediaType: MediaType? = nil,
         rawText: String,
@@ -34,6 +36,7 @@ public final class ChatMessage {
         self.timestamp = timestamp
         self.isSystemMessage = isSystemMessage
         self.isMediaPlaceholder = isMediaPlaceholder
+        self.isDeletedMessage = isDeletedMessage
         self.mediaFileName = mediaFileName
         self.mediaTypeRaw = mediaType?.rawValue
         self.rawText = rawText

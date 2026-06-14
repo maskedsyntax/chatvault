@@ -15,6 +15,44 @@ final class WhatsAppChatParserTests: XCTestCase {
         super.tearDown()
     }
     
+    func testParseIOSBracketFormatWithAMPM() {
+        let text = """
+        [1/15/24, 3:45:30 PM] John Doe: Hello from iOS
+        """
+
+        let chat = parser.parse(text: text)
+
+        XCTAssertEqual(chat.messages.count, 1)
+        XCTAssertEqual(chat.messages[0].senderName, "John Doe")
+        XCTAssertEqual(chat.messages[0].body, "Hello from iOS")
+        XCTAssertNotNil(chat.messages[0].timestamp)
+    }
+
+    func testParseDeletedMessage() {
+        let text = """
+        12/05/24, 9:42 PM - Aftaab: This message was deleted
+        12/05/24, 9:43 PM - Akanksha: You deleted this message
+        """
+
+        let chat = parser.parse(text: text)
+
+        XCTAssertEqual(chat.messages.count, 2)
+        XCTAssertTrue(chat.messages[0].isDeletedMessage)
+        XCTAssertTrue(chat.messages[1].isDeletedMessage)
+    }
+
+    func testParseGermanAttachedFile() {
+        let text = """
+        [16/03/2024, 09:14:22] Maria: foto.jpg (Datei angehängt)
+        """
+
+        let chat = parser.parse(text: text)
+
+        XCTAssertEqual(chat.messages.count, 1)
+        XCTAssertEqual(chat.messages[0].mediaFileName, "foto.jpg")
+        XCTAssertEqual(chat.messages[0].mediaType, .image)
+    }
+
     func testParseAndroidBracketFormat() {
         let text = """
         [16/03/2024, 09:14:22] Maria: Hello from Android

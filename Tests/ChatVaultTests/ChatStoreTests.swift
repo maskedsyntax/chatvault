@@ -70,6 +70,35 @@ final class ChatStoreTests: XCTestCase {
         XCTAssertEqual(duplicate?.title, "First")
     }
 
+    func testReimportArchiveReplacesMessages() throws {
+        let (store, container) = try makeStore()
+        let initial = WhatsAppChatParser().parse(text: "12/05/24, 9:42 PM - A: Hello")
+        let archive = try store.saveArchive(parsed: initial, title: "Chat", sourceFileName: "old.txt")
+
+        let updated = WhatsAppChatParser().parse(text: """
+        12/05/24, 9:42 PM - A: Hello
+        12/05/24, 9:43 PM - B: New message
+        """)
+        let importValue = ChatStore.ParsedImport(
+            parsed: updated,
+            suggestedTitle: "Chat",
+            sourceFileName: "new.txt",
+            encodingName: "UTF-8",
+            extractedBundleURL: nil,
+            mediaFileCount: 0
+        )
+
+        let reimported = try store.reimportArchive(archive, from: importValue)
+
+        XCTAssertEqual(reimported.id, archive.id)
+        XCTAssertEqual(reimported.messageCount, 2)
+        XCTAssertEqual(reimported.sourceFileName, "new.txt")
+
+        let messages = try container.mainContext.fetch(FetchDescriptor<ChatMessage>())
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages.last?.body, "New message")
+    }
+
     func testEmptyFileThrows() async throws {
         let (store, _) = try makeStore()
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("empty-\(UUID().uuidString).txt")

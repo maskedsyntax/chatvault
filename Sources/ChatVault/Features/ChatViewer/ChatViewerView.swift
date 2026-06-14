@@ -247,15 +247,8 @@ struct MessageListView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var hasScrolledToBottomOnAppear = false
-
-    private var messages: [ChatMessage] {
-        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return allMessages }
-        return allMessages.filter { message in
-            message.body.localizedStandardContains(trimmed) ||
-            (message.senderName?.localizedStandardContains(trimmed) ?? false)
-        }
-    }
+    @State private var cachedSections: [MessageSection] = []
+    @State private var filteredMessages: [ChatMessage] = []
 
     init(
         archive: ChatArchive,
@@ -282,11 +275,109 @@ struct MessageListView: View {
         )
     }
 
-    private var sections: [MessageSection] {
+    var body: some View {
+        ScrollViewReader { proxy in
+            Group {
+                if filteredMessages.isEmpty && !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    EmptyStateView(
+                        symbol: "magnifyingglass",
+                        title: "No Results",
+                        message: "No messages matching \"\(searchText)\"."
+                    )
+                } else {
+                    List {
+                        ForEach(cachedSections) { section in
+                            Section {
+                                ForEach(section.messages) { message in
+                                    MessageRow(
+                                        message: message,
+                                        chatLayout: chatLayout,
+                                        isHighlighted: highlightedMessageID == message.id,
+                                        storageDirectory: archive.storageDirectory
+                                    )
+                                    .id(message.id)
+                                    .listRowSeparator(.hidden)
+                                    .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+                                    .listRowBackground(Color.clear)
+                                }
+                            } header: {
+                                if let date = section.date {
+                                    DateSeparatorView(date: date)
+                                        .id("date-\(section.id)")
+                                        .textCase(nil)
+                                        .frame(maxWidth: .infinity)
+                                }
+                            }
+                        }
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                }
+            }
+            .background(ChatVaultTheme.chatBackground(for: colorScheme))
+            .onAppear {
+                rebuildCache()
+                scrollCoordinator.register(
+                    scrollToTop: {
+                        if let first = filteredMessages.first {
+                            proxy.scrollTo(first.id, anchor: .top)
+                        }
+                    },
+                    scrollToBottom: {
+                        if let last = filteredMessages.last {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    },
+                    scrollToMessage: { id in
+                        proxy.scrollTo(id, anchor: .center)
+                    }
+                )
+                scrollCoordinator.messageCount = allMessages.count
+                scrollCoordinator.isSearching = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                scrollCoordinator.updateSearchResults(filteredMessages.map(\.id))
+                scrollToBottomIfNeeded(proxy: proxy)
+            }
+            .onChange(of: allMessages.count) { _, _ in
+                rebuildCache()
+                scrollCoordinator.messageCount = allMessages.count
+                scrollCoordinator.updateSearchResults(filteredMessages.map(\.id))
+            }
+            .onChange(of: searchText) { oldValue, newValue in
+                rebuildCache()
+                scrollCoordinator.isSearching = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                scrollCoordinator.updateSearchResults(filteredMessages.map(\.id))
+                if oldValue.isEmpty && !newValue.isEmpty {
+                    hasScrolledToBottomOnAppear = true
+                }
+                if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let lastMessage = allMessages.last {
+                    proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                }
+            }
+            .onChange(of: archive.id) { _, _ in
+                hasScrolledToBottomOnAppear = false
+                rebuildCache()
+                scrollToBottomIfNeeded(proxy: proxy)
+            }
+        }
+    }
+
+    private func rebuildCache() {
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            filteredMessages = allMessages
+        } else {
+            filteredMessages = allMessages.filter { message in
+                message.body.localizedStandardContains(trimmed) ||
+                (message.senderName?.localizedStandardContains(trimmed) ?? false)
+            }
+        }
+        cachedSections = Self.buildSections(from: filteredMessages)
+    }
+
+    private static func buildSections(from messages: [ChatMessage]) -> [MessageSection] {
         var result: [MessageSection] = []
         var currentDay: Date?
         var currentMessages: [ChatMessage] = []
-
         let calendar = Calendar.current
 
         for message in messages {
@@ -315,82 +406,6 @@ struct MessageListView: View {
         }
 
         return result
-    }
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            Group {
-                if messages.isEmpty && !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    EmptyStateView(
-                        symbol: "magnifyingglass",
-                        title: "No Results",
-                        message: "No messages matching \"\(searchText)\"."
-                    )
-                } else {
-                    ScrollView {
-                        LazyVStack(spacing: 4) {
-                            ForEach(sections) { section in
-                                if let date = section.date {
-                                    DateSeparatorView(date: date)
-                                        .id("date-\(section.id)")
-                                }
-                                ForEach(section.messages) { message in
-                                    MessageRow(
-                                        message: message,
-                                        chatLayout: chatLayout,
-                                        isHighlighted: highlightedMessageID == message.id,
-                                        storageDirectory: archive.storageDirectory
-                                    )
-                                    .id(message.id)
-                                }
-                            }
-                        }
-                        .padding(.horizontal)
-                        .padding(.vertical, 8)
-                    }
-                }
-            }
-            .background(ChatVaultTheme.chatBackground(for: colorScheme))
-            .onAppear {
-                scrollCoordinator.register(
-                    scrollToTop: {
-                        if let first = messages.first {
-                            proxy.scrollTo(first.id, anchor: .top)
-                        }
-                    },
-                    scrollToBottom: {
-                        if let last = messages.last {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
-                    },
-                    scrollToMessage: { id in
-                        proxy.scrollTo(id, anchor: .center)
-                    }
-                )
-                scrollCoordinator.messageCount = allMessages.count
-                scrollCoordinator.isSearching = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                scrollCoordinator.updateSearchResults(messages.map(\.id))
-                scrollToBottomIfNeeded(proxy: proxy)
-            }
-            .onChange(of: allMessages.count) { _, _ in
-                scrollCoordinator.messageCount = allMessages.count
-                scrollCoordinator.updateSearchResults(messages.map(\.id))
-            }
-            .onChange(of: searchText) { oldValue, newValue in
-                scrollCoordinator.isSearching = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                scrollCoordinator.updateSearchResults(messages.map(\.id))
-                if oldValue.isEmpty && !newValue.isEmpty {
-                    hasScrolledToBottomOnAppear = true
-                }
-                if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let lastMessage = allMessages.last {
-                    proxy.scrollTo(lastMessage.id, anchor: .bottom)
-                }
-            }
-            .onChange(of: archive.id) { _, _ in
-                hasScrolledToBottomOnAppear = false
-                scrollToBottomIfNeeded(proxy: proxy)
-            }
-        }
     }
 
     private func scrollToBottomIfNeeded(proxy: ScrollViewProxy) {
@@ -446,7 +461,15 @@ struct MessageRow: View {
                             .foregroundStyle(ParticipantColor.color(for: sender))
                     }
 
-                    if message.isMediaPlaceholder {
+                    if message.isDeletedMessage {
+                        HStack(spacing: 4) {
+                            Image(systemName: "nosign")
+                            Text("Message deleted")
+                        }
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .italic()
+                    } else if message.isMediaPlaceholder {
                         HStack(spacing: 4) {
                             Image(systemName: "photo")
                             Text("Media omitted")

@@ -1,10 +1,37 @@
 import SwiftUI
 
+enum ImportPreviewMode: Equatable {
+    case newImport
+    case reimport(ChatArchive)
+    case batch(remaining: Int)
+
+    var navigationTitle: String {
+        switch self {
+        case .newImport:
+            return "Import Preview"
+        case .reimport:
+            return "Re-import Preview"
+        case .batch:
+            return "Batch Import"
+        }
+    }
+
+    var confirmButtonTitle: String {
+        switch self {
+        case .newImport, .batch:
+            return "Import"
+        case .reimport:
+            return "Update Archive"
+        }
+    }
+}
+
 struct ImportPreviewView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.chatStore) private var chatStore
 
     let parsedImport: ChatStore.ParsedImport
+    let mode: ImportPreviewMode
     let possibleDuplicate: ChatArchive?
     let onImport: (ChatArchive) -> Void
 
@@ -15,10 +42,12 @@ struct ImportPreviewView: View {
 
     init(
         parsedImport: ChatStore.ParsedImport,
+        mode: ImportPreviewMode = .newImport,
         possibleDuplicate: ChatArchive?,
         onImport: @escaping (ChatArchive) -> Void
     ) {
         self.parsedImport = parsedImport
+        self.mode = mode
         self.possibleDuplicate = possibleDuplicate
         self.onImport = onImport
         _title = State(initialValue: parsedImport.suggestedTitle)
@@ -55,7 +84,26 @@ struct ImportPreviewView: View {
                     }
                 }
 
-                if possibleDuplicate != nil {
+                if case .batch(let remaining) = mode, remaining > 0 {
+                    Section {
+                        Label("\(remaining) more file(s) queued after this one.", systemImage: "tray.full")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if case .reimport(let archive) = mode {
+                    Section {
+                        Label {
+                            Text("Updating \"\(archive.title)\" — existing messages and media will be replaced.")
+                        } icon: {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .foregroundStyle(.blue)
+                        }
+                    }
+                }
+
+                if possibleDuplicate != nil, case .newImport = mode {
                     Section {
                         Label {
                             Text("This file may already be imported as \"\(possibleDuplicate!.title)\". You can import anyway to create a duplicate.")
@@ -105,6 +153,12 @@ struct ImportPreviewView: View {
                     if parsed.attachedMediaCount > 0 {
                         LabeledContent("Linked Attachments", value: "\(parsed.attachedMediaCount)")
                     }
+                    if parsed.messages.contains(where: \.isDeletedMessage) {
+                        LabeledContent(
+                            "Deleted Messages",
+                            value: "\(parsed.messages.filter(\.isDeletedMessage).count)"
+                        )
+                    }
                 }
 
                 if parsed.messages.count >= 10_000 {
@@ -142,14 +196,14 @@ struct ImportPreviewView: View {
                 }
             }
             .formStyle(.grouped)
-            .navigationTitle("Import Preview")
+            .navigationTitle(mode.navigationTitle)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                         .disabled(isImporting)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Import") { performImport() }
+                    Button(mode.confirmButtonTitle) { performImport() }
                         .disabled(trimmedTitle.isEmpty || isImporting)
                 }
             }
@@ -169,6 +223,7 @@ struct ImportPreviewView: View {
     }
 
     private func sampleText(for message: ParsedMessage) -> String {
+        if message.isDeletedMessage { return "Message deleted" }
         if message.isMediaPlaceholder { return "Media omitted" }
         if let fileName = message.mediaFileName { return fileName }
         return message.body
@@ -181,12 +236,22 @@ struct ImportPreviewView: View {
 
         Task {
             do {
-                let archive = try chatStore.saveArchive(
-                    from: parsedImport,
-                    title: trimmedTitle
-                )
+                let archive: ChatArchive
+                switch mode {
+                case .reimport(let existing):
+                    archive = try chatStore.reimportArchive(
+                        existing,
+                        from: parsedImport,
+                        title: trimmedTitle
+                    )
+                case .newImport, .batch:
+                    archive = try chatStore.saveArchive(
+                        from: parsedImport,
+                        title: trimmedTitle
+                    )
+                }
+                isImporting = false
                 onImport(archive)
-                dismiss()
             } catch {
                 importError = error
                 isImporting = false

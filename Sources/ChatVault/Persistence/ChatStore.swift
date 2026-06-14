@@ -6,6 +6,8 @@ public final class ChatStore {
     private let modelContext: ModelContext
     private let parser: WhatsAppChatParser
 
+    private static let messageBatchSize = 500
+
     public init(modelContext: ModelContext) {
         self.modelContext = modelContext
         self.parser = WhatsAppChatParser()
@@ -38,6 +40,21 @@ public final class ChatStore {
             return try await parseZipImport(from: url)
         }
         return try await parseTextImport(from: url)
+    }
+
+    public func parseImports(from urls: [URL]) async -> (imports: [ParsedImport], errors: [(URL, Error)]) {
+        var imports: [ParsedImport] = []
+        var errors: [(URL, Error)] = []
+
+        for url in urls {
+            do {
+                imports.append(try await parseImport(from: url))
+            } catch {
+                errors.append((url, error))
+            }
+        }
+
+        return (imports, errors)
     }
 
     public func parseChat(from url: URL) async throws -> ParsedImport {
@@ -91,10 +108,11 @@ public final class ChatStore {
     }
 
     private func parseText(_ text: String, sourceName: String) throws -> ParsedChat {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = WhatsAppChatParser.normalizeInput(text)
+        let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw ImportError.emptyFile }
 
-        let parsedChat = parser.parse(text: text)
+        let parsedChat = parser.parse(text: normalized)
         guard !parsedChat.messages.isEmpty else { throw ImportError.noMessagesFound }
         _ = sourceName
         return parsedChat
@@ -127,23 +145,48 @@ public final class ChatStore {
         )
 
         modelContext.insert(archive)
+        try insertMessages(parsedImport.parsed.messages, into: archive)
+        try modelContext.save()
+        return archive
+    }
 
-        for (index, msg) in parsedImport.parsed.messages.enumerated() {
-            let chatMessage = ChatMessage(
-                senderName: msg.senderName,
-                body: msg.body,
-                timestamp: msg.timestamp,
-                isSystemMessage: msg.isSystemMessage,
-                isMediaPlaceholder: msg.isMediaPlaceholder,
-                mediaFileName: msg.mediaFileName,
-                mediaType: msg.mediaType,
-                rawText: msg.rawText,
-                sequenceIndex: index
-            )
-            chatMessage.chatArchive = archive
-            modelContext.insert(chatMessage)
+    @discardableResult
+    public func reimportArchive(
+        _ archive: ChatArchive,
+        from parsedImport: ParsedImport,
+        title: String? = nil
+    ) throws -> ChatArchive {
+        if let title {
+            let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedTitle.isEmpty else { throw ImportError.invalidTitle }
+            archive.title = trimmedTitle
         }
 
+        deleteArchiveFiles(for: archive)
+
+        for message in archive.messages {
+            modelContext.delete(message)
+        }
+        archive.messages.removeAll()
+
+        var storagePath: String?
+        var mediaCount = parsedImport.mediaFileCount
+
+        if let temporaryBundleURL = parsedImport.extractedBundleURL {
+            let permanentURL = try ArchiveStorage.moveTemporaryBundle(from: temporaryBundleURL, to: archive.id)
+            storagePath = permanentURL.path
+            mediaCount = ArchiveStorage.mediaCount(in: permanentURL)
+        }
+
+        archive.sourceFileName = parsedImport.sourceFileName
+        archive.messageCount = parsedImport.parsed.messages.count
+        archive.participants = parsedImport.parsed.participants
+        archive.lastMessageDate = parsedImport.parsed.messages.last?.timestamp
+        archive.storageDirectory = storagePath
+        archive.mediaFileCount = mediaCount
+        archive.updatedAt = Date()
+
+        try insertMessages(parsedImport.parsed.messages, into: archive)
         try modelContext.save()
         return archive
     }
@@ -163,6 +206,29 @@ public final class ChatStore {
             mediaFileCount: 0
         )
         return try saveArchive(from: importValue, title: title)
+    }
+
+    private func insertMessages(_ parsedMessages: [ParsedMessage], into archive: ChatArchive) throws {
+        for (index, msg) in parsedMessages.enumerated() {
+            let chatMessage = ChatMessage(
+                senderName: msg.senderName,
+                body: msg.body,
+                timestamp: msg.timestamp,
+                isSystemMessage: msg.isSystemMessage,
+                isMediaPlaceholder: msg.isMediaPlaceholder,
+                isDeletedMessage: msg.isDeletedMessage,
+                mediaFileName: msg.mediaFileName,
+                mediaType: msg.mediaType,
+                rawText: msg.rawText,
+                sequenceIndex: index
+            )
+            chatMessage.chatArchive = archive
+            modelContext.insert(chatMessage)
+
+            if (index + 1) % Self.messageBatchSize == 0 {
+                try modelContext.save()
+            }
+        }
     }
 
     public func findPossibleDuplicate(sourceFileName: String, messageCount: Int) -> ChatArchive? {
@@ -217,6 +283,11 @@ public final class ChatStore {
     }
 
     private static func decodeText(from data: Data) throws -> (String, String) {
+        var payload = data
+        if payload.starts(with: [0xEF, 0xBB, 0xBF]) {
+            payload.removeFirst(3)
+        }
+
         let encodings: [(String.Encoding, String)] = [
             (.utf8, "UTF-8"),
             (.utf16, "UTF-16"),
@@ -225,7 +296,7 @@ public final class ChatStore {
         ]
 
         for (encoding, name) in encodings {
-            if let text = String(data: data, encoding: encoding), !text.isEmpty {
+            if let text = String(data: payload, encoding: encoding), !text.isEmpty {
                 return (text, name)
             }
         }

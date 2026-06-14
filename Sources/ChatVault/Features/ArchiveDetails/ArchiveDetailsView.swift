@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UniformTypeIdentifiers
 
 struct ArchiveDetailsView: View {
     @Environment(\.dismiss) private var dismiss
@@ -12,6 +13,12 @@ struct ArchiveDetailsView: View {
     @State private var showRenameAlert = false
     @State private var renameTitle: String = ""
     @State private var showDeleteConfirmation = false
+
+    @State private var isReimporting = false
+    @State private var showReimportSheet = false
+    @State private var reimportPreview: ChatStore.ParsedImport?
+    @State private var reimportError: Error?
+    @State private var showReimportError = false
 
     var body: some View {
         NavigationStack {
@@ -46,6 +53,9 @@ struct ArchiveDetailsView: View {
                 }
 
                 Section {
+                    Button("Re-import from File") {
+                        isReimporting = true
+                    }
                     Button("Rename Archive") {
                         renameTitle = archive.title
                         showRenameAlert = true
@@ -60,6 +70,33 @@ struct ArchiveDetailsView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
+                }
+            }
+            .fileImporter(
+                isPresented: $isReimporting,
+                allowedContentTypes: [.plainText, .zip],
+                allowsMultipleSelection: false
+            ) { result in
+                handleReimportSelection(result: result)
+            }
+            .sheet(isPresented: $showReimportSheet, onDismiss: cancelReimport) {
+                if let preview = reimportPreview {
+                    ImportPreviewView(
+                        parsedImport: preview,
+                        mode: .reimport(archive),
+                        possibleDuplicate: nil
+                    ) { _ in
+                        preview.cleanupTemporaryFiles()
+                        showReimportSheet = false
+                        reimportPreview = nil
+                    }
+                }
+            }
+            .alert("Re-import Error", isPresented: $showReimportError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                if let reimportError {
+                    Text(reimportError.localizedDescription)
                 }
             }
             .alert("Rename Archive", isPresented: $showRenameAlert) {
@@ -108,5 +145,42 @@ struct ArchiveDetailsView: View {
             return date.formatted(date: .abbreviated, time: .shortened)
         }
         return "Unknown"
+    }
+
+    private func handleReimportSelection(result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            startReimport(from: url)
+        case .failure(let error):
+            reimportError = error
+            showReimportError = true
+        }
+    }
+
+    private func startReimport(from url: URL) {
+        guard let chatStore else { return }
+        let ext = url.pathExtension.lowercased()
+        guard ext == "txt" || ext == "zip" else {
+            reimportError = ChatStore.ImportError.fileUnreadable
+            showReimportError = true
+            return
+        }
+
+        Task {
+            do {
+                let parsed = try await chatStore.parseImport(from: url)
+                reimportPreview = parsed
+                showReimportSheet = true
+            } catch {
+                reimportError = error
+                showReimportError = true
+            }
+        }
+    }
+
+    private func cancelReimport() {
+        reimportPreview?.cleanupTemporaryFiles()
+        reimportPreview = nil
     }
 }

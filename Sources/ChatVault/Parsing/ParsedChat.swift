@@ -7,6 +7,7 @@ public struct ParsedMessage: Equatable, Identifiable {
     public let body: String
     public let isSystemMessage: Bool
     public let isMediaPlaceholder: Bool
+    public let isDeletedMessage: Bool
     public let mediaFileName: String?
     public let mediaType: MediaType?
     public let rawText: String
@@ -17,6 +18,7 @@ public struct ParsedMessage: Equatable, Identifiable {
         body: String,
         isSystemMessage: Bool,
         isMediaPlaceholder: Bool,
+        isDeletedMessage: Bool = false,
         mediaFileName: String? = nil,
         mediaType: MediaType? = nil,
         rawText: String
@@ -26,6 +28,7 @@ public struct ParsedMessage: Equatable, Identifiable {
         self.body = body
         self.isSystemMessage = isSystemMessage
         self.isMediaPlaceholder = isMediaPlaceholder
+        self.isDeletedMessage = isDeletedMessage
         self.mediaFileName = mediaFileName
         self.mediaType = mediaType
         self.rawText = rawText

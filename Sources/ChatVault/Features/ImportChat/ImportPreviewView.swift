@@ -157,6 +157,9 @@ struct ImportPreviewView: View {
 
                 Section("Chat Title") {
                     TextField("Title", text: $title)
+                    Text("From: \(parsedImport.sourceFileName)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 if !participants.isEmpty {

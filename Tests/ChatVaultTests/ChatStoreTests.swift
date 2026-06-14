@@ -130,4 +130,29 @@ final class ChatStoreTests: XCTestCase {
             // expected
         }
     }
+
+    func testParseZipSampleExports() async throws {
+        let (store, _) = try makeStore()
+        let base = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("test-fixtures/sample-exports")
+
+        let zips = [
+            "WhatsApp Chat with Sarah.zip",
+            "WhatsApp Chat with Weekend Hikers.zip",
+            "WhatsApp Chat with David Chen.zip",
+        ]
+
+        for name in zips {
+            let url = base.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                throw XCTSkip("Sample ZIP not found at \(url.path)")
+            }
+            let parsed = try await store.parseImport(from: url)
+            XCTAssertGreaterThan(parsed.parsed.messages.count, 0)
+            XCTAssertGreaterThan(parsed.mediaFileCount, 0)
+        }
+    }
 }

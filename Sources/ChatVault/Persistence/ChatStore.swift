@@ -13,7 +13,7 @@ public final class ChatStore {
         self.parser = WhatsAppChatParser()
     }
 
-    public struct ParsedImport: Identifiable {
+    public struct ParsedImport: Identifiable, Sendable {
         public let id = UUID()
         public let parsed: ParsedChat
         public let suggestedTitle: String
@@ -47,18 +47,9 @@ public final class ChatStore {
     }
 
     public func parseImports(from urls: [URL]) async -> (imports: [ParsedImport], errors: [(URL, Error)]) {
-        var imports: [ParsedImport] = []
-        var errors: [(URL, Error)] = []
-
-        for url in urls {
-            do {
-                imports.append(try await parseImport(from: url))
-            } catch {
-                errors.append((url, error))
-            }
-        }
-
-        return (imports, errors)
+        await Task.detached(priority: .userInitiated) {
+            ZipImportParser.parseImports(from: urls)
+        }.value
     }
 
     public func parseChat(from url: URL) async throws -> ParsedImport {

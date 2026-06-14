@@ -82,7 +82,7 @@ struct ContentView: View {
                 }
             }
         }
-        .task {
+        .onAppear {
             if chatStore == nil {
                 chatStore = ChatStore(modelContext: modelContext)
             }

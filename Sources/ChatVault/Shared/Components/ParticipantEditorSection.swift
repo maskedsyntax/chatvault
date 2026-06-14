@@ -45,9 +45,6 @@ struct ParticipantEditorSection: View {
             Text("Set display names to identify people in group chats. Mark yourself as \"Me\" so sent messages align correctly.")
                 .font(.caption)
         }
-        .onChange(of: participants) { _, _ in
-            updateSuggestedTitle()
-        }
     }
 
     private func updateSuggestedTitle() {

@@ -14,11 +14,13 @@ struct ArchiveListView: View {
     @State private var showError = false
     @State private var isDropTargeted = false
 
-    @State private var showImportSheet = false
     @State private var currentImport: ChatStore.ParsedImport?
     @State private var importQueue: [ChatStore.ParsedImport] = []
     @State private var importMode: ImportPreviewMode = .newImport
     @State private var pendingDuplicate: ChatArchive?
+    @State private var shouldCleanupImportOnSheetDismiss = true
+    @State private var isParsingImports = false
+    @State private var parsingLabel = "Reading files…"
 
     @State private var archiveToRename: ChatArchive?
     @State private var newArchiveTitle: String = ""
@@ -81,17 +83,35 @@ struct ArchiveListView: View {
                     .allowsHitTesting(false)
             }
         }
-        .sheet(isPresented: $showImportSheet, onDismiss: cancelImportSession) {
-            if let currentImport {
-                ImportPreviewView(
-                    parsedImport: currentImport,
-                    mode: importMode,
-                    possibleDuplicate: pendingDuplicate
-                ) { archive in
-                    handleImportComplete(archive)
+        .overlay {
+            if isParsingImports {
+                ZStack {
+                    Color.black.opacity(0.25)
+                        .ignoresSafeArea()
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .controlSize(.large)
+                        Text(parsingLabel)
+                            .font(.headline)
+                        Text("This usually takes a few seconds.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(24)
+                    .background(.regularMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
                 }
-                .id(currentImport.id)
             }
+        }
+        .sheet(item: $currentImport, onDismiss: handleImportSheetDismiss) { item in
+            ImportPreviewView(
+                parsedImport: item,
+                mode: importMode,
+                possibleDuplicate: pendingDuplicate
+            ) { archive in
+                handleImportComplete(archive)
+            }
+            .id(item.id)
         }
         .alert("Import Error", isPresented: $showError) {
             Button("OK", role: .cancel) {}
@@ -193,10 +213,38 @@ struct ArchiveListView: View {
     }
 
     private func importURLs(_ urls: [URL]) {
-        guard let chatStore else { return }
+        guard let store = chatStore else {
+            importError = ImportBatchError.storeUnavailable
+            showError = true
+            return
+        }
+
+        let scopedAccess = urls.map { url -> (URL, Bool) in
+            (url, url.startAccessingSecurityScopedResource())
+        }
+
+        isParsingImports = true
+        parsingLabel = "Reading \(urls.count) file\(urls.count == 1 ? "" : "s")…"
 
         Task {
-            let result = await chatStore.parseImports(from: urls)
+            var localURLs: [URL] = []
+            defer {
+                for (url, accessed) in scopedAccess where accessed {
+                    url.stopAccessingSecurityScopedResource()
+                }
+                ImportFilePreparer.removeTemporaryDirectories(for: localURLs)
+                isParsingImports = false
+            }
+
+            do {
+                localURLs = try ImportFilePreparer.copyToTemporaryDirectory(urls: urls)
+            } catch {
+                importError = error
+                showError = true
+                return
+            }
+
+            let result = await store.parseImports(from: localURLs)
 
             if result.imports.isEmpty {
                 importError = result.errors.first?.1 ?? ChatStore.ImportError.fileUnreadable
@@ -205,12 +253,26 @@ struct ArchiveListView: View {
             }
 
             if !result.errors.isEmpty {
-                importError = result.errors.first?.1
+                let failedNames = result.errors.map { $0.0.lastPathComponent }.joined(separator: ", ")
+                importError = ImportBatchError.partialFailure(
+                    imported: result.imports.count,
+                    failed: result.errors.count,
+                    failedNames: failedNames,
+                    underlying: result.errors.first?.1
+                )
                 showError = true
             }
 
             beginImportSession(with: result.imports)
         }
+    }
+
+    private func handleImportSheetDismiss() {
+        guard shouldCleanupImportOnSheetDismiss else {
+            shouldCleanupImportOnSheetDismiss = true
+            return
+        }
+        cancelImportSession()
     }
 
     private func beginImportSession(with imports: [ChatStore.ParsedImport]) {
@@ -223,7 +285,6 @@ struct ArchiveListView: View {
             messageCount: first.parsed.messages.count
         )
         importMode = importQueue.isEmpty ? .newImport : .batch(remaining: importQueue.count)
-        showImportSheet = true
     }
 
     private func handleImportComplete(_ archive: ChatArchive) {
@@ -231,7 +292,7 @@ struct ArchiveListView: View {
         currentImport?.cleanupTemporaryFiles()
 
         if importQueue.isEmpty {
-            showImportSheet = false
+            shouldCleanupImportOnSheetDismiss = false
             currentImport = nil
             pendingDuplicate = nil
             importMode = .newImport
@@ -281,5 +342,23 @@ struct ArchiveListView: View {
         try? chatStore?.deleteSearchIndex(for: archive)
         modelContext.delete(archive)
         try? modelContext.save()
+    }
+}
+
+private enum ImportBatchError: LocalizedError {
+    case storeUnavailable
+    case partialFailure(imported: Int, failed: Int, failedNames: String, underlying: Error?)
+
+    var errorDescription: String? {
+        switch self {
+        case .storeUnavailable:
+            return "ChatVault is still starting up. Please try importing again in a moment."
+        case .partialFailure(let imported, let failed, let failedNames, let underlying):
+            var message = "Imported \(imported) file(s), but \(failed) failed (\(failedNames))."
+            if let underlying {
+                message += " \(underlying.localizedDescription)"
+            }
+            return message
+        }
     }
 }

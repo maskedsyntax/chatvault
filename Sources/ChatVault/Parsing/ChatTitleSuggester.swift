@@ -64,7 +64,7 @@ public enum ChatTitleSuggester {
             return others[0].resolvedDisplayName
         }
         if others.count > 1 {
-            return others.map(\.resolvedDisplayName).joined(separator: ", ")
+            return fallback
         }
         return fallback
     }

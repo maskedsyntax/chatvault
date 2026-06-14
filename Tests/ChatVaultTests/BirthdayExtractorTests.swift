@@ -53,4 +53,19 @@ final class BirthdayExtractorTests: XCTestCase {
         XCTAssertEqual(setup.suggestedTitle, "Akanksha")
         XCTAssertTrue(setup.participantDrafts.first(where: { $0.exportName == "Aftaab" })?.isMe == true)
     }
+
+    func testSuggestedTitleForGroupUsesFileName() {
+        let drafts = [
+            ImportParticipantDraft(exportName: "Alice", isMe: false),
+            ImportParticipantDraft(exportName: "Bob", isMe: false),
+            ImportParticipantDraft(exportName: "James", isMe: true),
+        ]
+
+        let title = ChatTitleSuggester.suggestedTitle(
+            for: drafts,
+            fallback: "Weekend Hikers"
+        )
+
+        XCTAssertEqual(title, "Weekend Hikers")
+    }
 }

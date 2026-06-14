@@ -1,6 +1,6 @@
 import Foundation
 
-public struct ParsedMessage: Equatable, Identifiable {
+public struct ParsedMessage: Equatable, Identifiable, Sendable {
     public let id = UUID()
     public let timestamp: Date?
     public let senderName: String?
@@ -39,7 +39,7 @@ public struct ParsedMessage: Equatable, Identifiable {
     }
 }
 
-public struct ParsedChat: Equatable {
+public struct ParsedChat: Equatable, Sendable {
     public let messages: [ParsedMessage]
     public let participants: [String]
     public let warnings: [ParserWarning]

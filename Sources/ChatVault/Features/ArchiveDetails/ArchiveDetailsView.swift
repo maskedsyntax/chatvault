@@ -21,6 +21,9 @@ struct ArchiveDetailsView: View {
                     LabeledContent("Source File", value: archive.sourceFileName)
                     LabeledContent("Imported", value: archive.importedAt.formatted(date: .abbreviated, time: .shortened))
                     LabeledContent("Messages", value: "\(archive.messageCount)")
+                    if archive.mediaFileCount > 0 {
+                        LabeledContent("Media Files", value: "\(archive.mediaFileCount)")
+                    }
                 }
 
                 Section("Date Range") {
@@ -80,6 +83,7 @@ struct ArchiveDetailsView: View {
                     if selectedArchive?.id == archive.id {
                         selectedArchive = nil
                     }
+                    chatStore?.deleteArchiveFiles(for: archive)
                     modelContext.delete(archive)
                     try? modelContext.save()
                     dismiss()

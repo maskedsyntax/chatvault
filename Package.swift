@@ -6,11 +6,18 @@ import PackageDescription
 let package = Package(
     name: "ChatVault",
     platforms: [.macOS(.v14)],
+    dependencies: [
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", from: "0.9.19"),
+    ],
     targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
         .executableTarget(
-            name: "ChatVault"
+            name: "ChatVault",
+            dependencies: [
+                .product(name: "ZIPFoundation", package: "ZIPFoundation"),
+            ],
+            resources: [
+                .process("Resources"),
+            ]
         ),
         .testTarget(
             name: "ChatVaultTests",

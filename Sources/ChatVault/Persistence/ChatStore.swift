@@ -11,14 +11,22 @@ public final class ChatStore {
         self.parser = WhatsAppChatParser()
     }
 
-    public struct ParsedImport {
+    public struct ParsedImport: Identifiable {
+        public let id = UUID()
         public let parsed: ParsedChat
         public let suggestedTitle: String
         public let sourceFileName: String
         public let encodingName: String
+        public let extractedBundleURL: URL?
+        public let mediaFileCount: Int
+
+        public func cleanupTemporaryFiles() {
+            guard let extractedBundleURL else { return }
+            try? FileManager.default.removeItem(at: extractedBundleURL)
+        }
     }
 
-    public func parseChat(from url: URL) async throws -> ParsedImport {
+    public func parseImport(from url: URL) async throws -> ParsedImport {
         let accessing = url.startAccessingSecurityScopedResource()
         defer {
             if accessing {
@@ -26,65 +34,109 @@ public final class ChatStore {
             }
         }
 
-        let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch {
-            throw ImportError.fileUnreadable
+        if url.pathExtension.lowercased() == "zip" {
+            return try await parseZipImport(from: url)
         }
+        return try await parseTextImport(from: url)
+    }
 
-        guard !data.isEmpty else {
-            throw ImportError.emptyFile
-        }
+    public func parseChat(from url: URL) async throws -> ParsedImport {
+        try await parseImport(from: url)
+    }
 
+    private func parseTextImport(from url: URL) async throws -> ParsedImport {
+        let data = try readData(from: url)
         let (text, encodingName) = try Self.decodeText(from: data)
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw ImportError.emptyFile
-        }
-
-        let parsedChat = parser.parse(text: text)
-        guard !parsedChat.messages.isEmpty else {
-            throw ImportError.noMessagesFound
-        }
-
+        let parsedChat = try parseText(text, sourceName: url.lastPathComponent)
         let suggestedTitle = url.deletingPathExtension().lastPathComponent
+
         return ParsedImport(
             parsed: parsedChat,
             suggestedTitle: suggestedTitle,
             sourceFileName: url.lastPathComponent,
-            encodingName: encodingName
+            encodingName: encodingName,
+            extractedBundleURL: nil,
+            mediaFileCount: 0
         )
     }
 
+    private func parseZipImport(from url: URL) async throws -> ParsedImport {
+        let tempDirectory = try ArchiveStorage.makeTemporaryImportDirectory()
+        do {
+            try ArchiveStorage.extractZip(from: url, to: tempDirectory)
+            guard let chatFileURL = ArchiveStorage.findChatTextFile(in: tempDirectory) else {
+                try? FileManager.default.removeItem(at: tempDirectory)
+                throw ImportError.chatTextNotFoundInZip
+            }
+
+            let data = try readData(from: chatFileURL)
+            let (text, encodingName) = try Self.decodeText(from: data)
+            let parsedChat = try parseText(text, sourceName: chatFileURL.lastPathComponent)
+            let suggestedTitle = url.deletingPathExtension().lastPathComponent
+                .replacingOccurrences(of: "WhatsApp Chat with ", with: "")
+                .replacingOccurrences(of: "WhatsApp Chat - ", with: "")
+
+            return ParsedImport(
+                parsed: parsedChat,
+                suggestedTitle: suggestedTitle,
+                sourceFileName: url.lastPathComponent,
+                encodingName: encodingName,
+                extractedBundleURL: tempDirectory,
+                mediaFileCount: ArchiveStorage.mediaCount(in: tempDirectory)
+            )
+        } catch {
+            try? FileManager.default.removeItem(at: tempDirectory)
+            throw error
+        }
+    }
+
+    private func parseText(_ text: String, sourceName: String) throws -> ParsedChat {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw ImportError.emptyFile }
+
+        let parsedChat = parser.parse(text: text)
+        guard !parsedChat.messages.isEmpty else { throw ImportError.noMessagesFound }
+        _ = sourceName
+        return parsedChat
+    }
+
     @discardableResult
-    public func saveArchive(
-        parsed: ParsedChat,
-        title: String,
-        sourceFileName: String
-    ) throws -> ChatArchive {
+    public func saveArchive(from parsedImport: ParsedImport, title: String) throws -> ChatArchive {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedTitle.isEmpty else {
-            throw ImportError.invalidTitle
+        guard !trimmedTitle.isEmpty else { throw ImportError.invalidTitle }
+
+        let archiveID = UUID()
+        var storagePath: String?
+        var mediaCount = parsedImport.mediaFileCount
+
+        if let temporaryBundleURL = parsedImport.extractedBundleURL {
+            let permanentURL = try ArchiveStorage.moveTemporaryBundle(from: temporaryBundleURL, to: archiveID)
+            storagePath = permanentURL.path
+            mediaCount = ArchiveStorage.mediaCount(in: permanentURL)
         }
 
         let archive = ChatArchive(
+            id: archiveID,
             title: trimmedTitle,
-            sourceFileName: sourceFileName,
-            messageCount: parsed.messages.count,
-            participants: parsed.participants,
-            lastMessageDate: parsed.messages.last?.timestamp
+            sourceFileName: parsedImport.sourceFileName,
+            messageCount: parsedImport.parsed.messages.count,
+            participants: parsedImport.parsed.participants,
+            lastMessageDate: parsedImport.parsed.messages.last?.timestamp,
+            storageDirectory: storagePath,
+            mediaFileCount: mediaCount
         )
 
         modelContext.insert(archive)
 
-        for (index, msg) in parsed.messages.enumerated() {
+        for (index, msg) in parsedImport.parsed.messages.enumerated() {
             let chatMessage = ChatMessage(
                 senderName: msg.senderName,
                 body: msg.body,
                 timestamp: msg.timestamp,
                 isSystemMessage: msg.isSystemMessage,
                 isMediaPlaceholder: msg.isMediaPlaceholder,
+                mediaFileName: msg.mediaFileName,
+                mediaType: msg.mediaType,
                 rawText: msg.rawText,
                 sequenceIndex: index
             )
@@ -96,6 +148,23 @@ public final class ChatStore {
         return archive
     }
 
+    @discardableResult
+    public func saveArchive(
+        parsed: ParsedChat,
+        title: String,
+        sourceFileName: String
+    ) throws -> ChatArchive {
+        let importValue = ParsedImport(
+            parsed: parsed,
+            suggestedTitle: title,
+            sourceFileName: sourceFileName,
+            encodingName: "UTF-8",
+            extractedBundleURL: nil,
+            mediaFileCount: 0
+        )
+        return try saveArchive(from: importValue, title: title)
+    }
+
     public func findPossibleDuplicate(sourceFileName: String, messageCount: Int) -> ChatArchive? {
         let descriptor = FetchDescriptor<ChatArchive>()
         guard let archives = try? modelContext.fetch(descriptor) else { return nil }
@@ -103,12 +172,12 @@ public final class ChatStore {
     }
 
     public func importChat(from url: URL) async throws -> ChatArchive {
-        let parsedImport = try await parseChat(from: url)
-        return try saveArchive(
-            parsed: parsedImport.parsed,
-            title: parsedImport.suggestedTitle,
-            sourceFileName: parsedImport.sourceFileName
-        )
+        let parsedImport = try await parseImport(from: url)
+        return try saveArchive(from: parsedImport, title: parsedImport.suggestedTitle)
+    }
+
+    public func deleteArchiveFiles(for archive: ChatArchive) {
+        ArchiveStorage.deleteBundle(at: archive.storageDirectory)
     }
 
     public func firstMessageDate(for archive: ChatArchive) -> Date? {
@@ -122,6 +191,29 @@ public final class ChatStore {
         descriptor.fetchLimit = 100
         let messages = (try? modelContext.fetch(descriptor)) ?? []
         return messages.first(where: { $0.timestamp != nil })?.timestamp
+    }
+
+    public func mediaItems(for archive: ChatArchive) -> [MediaItem] {
+        guard let storagePath = archive.storageDirectory else { return [] }
+        return ArchiveStorage.mediaFiles(in: URL(fileURLWithPath: storagePath, isDirectory: true)).map {
+            MediaItem(
+                fileName: $0.lastPathComponent,
+                fileURL: $0,
+                mediaType: MediaType.infer(from: $0.lastPathComponent)
+            )
+        }
+    }
+
+    private func readData(from url: URL) throws -> Data {
+        do {
+            let data = try Data(contentsOf: url)
+            guard !data.isEmpty else { throw ImportError.emptyFile }
+            return data
+        } catch let error as ImportError {
+            throw error
+        } catch {
+            throw ImportError.fileUnreadable
+        }
     }
 
     private static func decodeText(from data: Data) throws -> (String, String) {
@@ -141,12 +233,13 @@ public final class ChatStore {
         throw ImportError.encodingFailed
     }
 
-    public enum ImportError: LocalizedError {
+    public enum ImportError: LocalizedError, Equatable {
         case fileUnreadable
         case encodingFailed
         case emptyFile
         case noMessagesFound
         case invalidTitle
+        case chatTextNotFoundInZip
 
         public var errorDescription: String? {
             switch self {
@@ -160,7 +253,23 @@ public final class ChatStore {
                 return "No valid messages were found in the selected file."
             case .invalidTitle:
                 return "Please enter a valid chat title."
+            case .chatTextNotFoundInZip:
+                return "No chat .txt file was found inside the ZIP archive."
             }
         }
+    }
+}
+
+public struct MediaItem: Identifiable, Hashable {
+    public let id: String
+    public let fileName: String
+    public let fileURL: URL
+    public let mediaType: MediaType
+
+    public init(fileName: String, fileURL: URL, mediaType: MediaType) {
+        self.id = fileName
+        self.fileName = fileName
+        self.fileURL = fileURL
+        self.mediaType = mediaType
     }
 }

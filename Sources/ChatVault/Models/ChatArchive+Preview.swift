@@ -18,6 +18,9 @@ extension ChatArchive {
         if message.isMediaPlaceholder {
             return "Media omitted"
         }
+        if let fileName = message.mediaFileName {
+            return fileName
+        }
         if let sender = message.senderName {
             return "\(sender): \(message.body)"
         }

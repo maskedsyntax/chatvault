@@ -1,13 +1,23 @@
 import SwiftUI
 import SwiftData
+#if os(macOS)
+import AppKit
+#endif
 
 @main
 struct ChatVaultApp: App {
     let modelContainer: ModelContainer
 
     init() {
+        #if os(macOS)
+        // SPM executables default to a non-regular activation policy, which hides
+        // the app from the Dock and keeps windows behind other applications.
+        NSApplication.shared.setActivationPolicy(.regular)
+        ChatVaultLogo.configureApplicationIconIfNeeded()
+        #endif
+
         do {
-            modelContainer = try ModelContainer(for: ChatArchive.self, ChatMessage.self)
+            modelContainer = try ModelContainerFactory.make()
         } catch {
             fatalError("Could not initialize ModelContainer: \(error)")
         }
@@ -16,10 +26,22 @@ struct ChatVaultApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .onAppear(perform: activateApplication)
         }
         .modelContainer(modelContainer)
         .defaultSize(width: 960, height: 640)
+        .commands {
+            CommandGroup(replacing: .newItem) {}
+        }
     }
+
+    #if os(macOS)
+    private func activateApplication() {
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+    #else
+    private func activateApplication() {}
+    #endif
 }
 
 struct ContentView: View {
@@ -31,12 +53,26 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            ArchiveListView(selectedArchive: $selectedArchive)
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    ChatVaultLogoView(size: 28)
+                    Text("ChatVault")
+                        .font(.headline)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+
+                ArchiveListView(selectedArchive: $selectedArchive)
+            }
         } detail: {
-            if let archive = selectedArchive {
-                ChatViewerView(archive: archive, selectedArchive: $selectedArchive)
-            } else {
-                SelectArchivePlaceholder(hasArchives: !archives.isEmpty)
+            NavigationStack {
+                if let archive = selectedArchive {
+                    ChatViewerView(archive: archive, selectedArchive: $selectedArchive)
+                } else {
+                    SelectArchivePlaceholder(hasArchives: !archives.isEmpty)
+                }
             }
         }
         .task {

@@ -9,11 +9,13 @@ public final class ChatMessage {
     public var timestamp: Date?
     public var isSystemMessage: Bool
     public var isMediaPlaceholder: Bool
+    public var mediaFileName: String?
+    public var mediaTypeRaw: String?
     public var rawText: String
     public var sequenceIndex: Int
-    
+
     public var chatArchive: ChatArchive?
-    
+
     public init(
         id: UUID = UUID(),
         senderName: String? = nil,
@@ -21,6 +23,8 @@ public final class ChatMessage {
         timestamp: Date? = nil,
         isSystemMessage: Bool = false,
         isMediaPlaceholder: Bool = false,
+        mediaFileName: String? = nil,
+        mediaType: MediaType? = nil,
         rawText: String,
         sequenceIndex: Int
     ) {
@@ -30,7 +34,18 @@ public final class ChatMessage {
         self.timestamp = timestamp
         self.isSystemMessage = isSystemMessage
         self.isMediaPlaceholder = isMediaPlaceholder
+        self.mediaFileName = mediaFileName
+        self.mediaTypeRaw = mediaType?.rawValue
         self.rawText = rawText
         self.sequenceIndex = sequenceIndex
+    }
+
+    public var mediaType: MediaType? {
+        guard let mediaTypeRaw else { return nil }
+        return MediaType(rawValue: mediaTypeRaw)
+    }
+
+    public var hasResolvableMedia: Bool {
+        mediaFileName != nil && !isMediaPlaceholder
     }
 }

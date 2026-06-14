@@ -30,7 +30,8 @@ struct DateSeparatorView: View {
 }
 
 struct EmptyStateView: View {
-    let symbol: String
+    var symbol: String? = nil
+    var useLogo = false
     let title: String
     let message: String
     var actionTitle: String? = nil
@@ -38,9 +39,13 @@ struct EmptyStateView: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            Image(systemName: symbol)
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
+            if useLogo {
+                ChatVaultLogoView(size: 88)
+            } else if let symbol {
+                Image(systemName: symbol)
+                    .font(.system(size: 48))
+                    .foregroundStyle(.secondary)
+            }
             Text(title)
                 .font(.title2)
                 .fontWeight(.semibold)
@@ -65,11 +70,11 @@ struct SelectArchivePlaceholder: View {
 
     var body: some View {
         EmptyStateView(
-            symbol: "message",
+            useLogo: !hasArchives,
             title: hasArchives ? "Select a Chat" : "Welcome to ChatVault",
             message: hasArchives
                 ? "Choose an imported chat from the sidebar to view messages."
-                : "Import a WhatsApp chat export (.txt) to get started."
+                : "Import a WhatsApp chat export (.txt or .zip) to get started."
         )
     }
 }
@@ -79,9 +84,9 @@ struct EmptyArchivesView: View {
 
     var body: some View {
         EmptyStateView(
-            symbol: "tray",
+            useLogo: true,
             title: "No Chats Yet",
-            message: "Export a chat from WhatsApp on Android, transfer the .txt file here, then import it.",
+            message: "Export a chat from WhatsApp on Android as a .txt or .zip file, transfer it here, then import it.",
             actionTitle: "Import Chat",
             action: onImport
         )

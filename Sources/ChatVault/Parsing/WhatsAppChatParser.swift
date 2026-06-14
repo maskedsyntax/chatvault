@@ -2,105 +2,141 @@ import Foundation
 
 public struct WhatsAppChatParser {
     public init() {}
-    
+
     public func parse(text: String) -> ParsedChat {
         var messages: [ParsedMessage] = []
         var participants = Set<String>()
         var warnings: [ParserWarning] = []
-        
+
         let lines = text.components(separatedBy: .newlines)
-        
-        // Regex to match the start of a message
-        // Group 1: Date (e.g., 12/05/24)
-        // Group 2: Time (e.g., 9:42 PM or 21:42)
-        // Group 3: Rest of the message (Sender: Message or System Message)
-        let pattern = #"^(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}),?\s+(\d{1,2}:\d{2}(?:\s?[aApP][mM])?)\s?-\s(.*)$"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-            return ParsedChat(messages: [], participants: [], warnings: [])
-        }
-        
-        var currentTimestamp: Date? = nil
-        var currentSender: String? = nil
-        var currentBody: String = ""
-        var currentIsSystem: Bool = false
-        var currentRawText: String = ""
-        
+
+        let patterns = [
+            #"^(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}),?\s+(\d{1,2}:\d{2}(?::\d{2})?(?:\s?[aApP][mM])?)\s?-\s(.*)$"#,
+            #"^\[(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}),\s*(\d{1,2}:\d{2}(?::\d{2})?)\]\s(.*)$"#,
+        ]
+        let regexes = patterns.compactMap { try? NSRegularExpression(pattern: $0, options: []) }
+
+        var currentTimestamp: Date?
+        var currentSender: String?
+        var currentBody = ""
+        var currentIsSystem = false
+        var currentRawText = ""
+
         func commitCurrentMessage() {
-            if !currentRawText.isEmpty {
-                let isMedia = currentBody.contains("<Media omitted>")
-                let msg = ParsedMessage(
-                    timestamp: currentTimestamp,
-                    senderName: currentSender,
-                    body: currentBody,
-                    isSystemMessage: currentIsSystem,
-                    isMediaPlaceholder: isMedia,
-                    rawText: currentRawText
-                )
-                messages.append(msg)
-                if let sender = currentSender {
-                    participants.insert(sender)
-                }
+            guard !currentRawText.isEmpty else { return }
+            let mediaInfo = Self.parseMedia(from: currentBody)
+            let message = ParsedMessage(
+                timestamp: currentTimestamp,
+                senderName: currentSender,
+                body: mediaInfo.displayBody,
+                isSystemMessage: currentIsSystem,
+                isMediaPlaceholder: mediaInfo.isPlaceholder,
+                mediaFileName: mediaInfo.fileName,
+                mediaType: mediaInfo.mediaType,
+                rawText: currentRawText
+            )
+            messages.append(message)
+            if let sender = currentSender {
+                participants.insert(sender)
             }
         }
-        
+
         for (index, line) in lines.enumerated() {
             if line.trimmingCharacters(in: .whitespaces).isEmpty && currentRawText.isEmpty {
-                continue // Skip leading empty lines
+                continue
             }
-            
-            let nsRange = NSRange(line.startIndex..<line.endIndex, in: line)
-            if let match = regex.firstMatch(in: line, options: [], range: nsRange) {
-                commitCurrentMessage() // commit previous
-                
-                let dateRange = Range(match.range(at: 1), in: line)!
-                let timeRange = Range(match.range(at: 2), in: line)!
-                let restRange = Range(match.range(at: 3), in: line)!
-                
-                let dateStr = String(line[dateRange])
-                let timeStr = String(line[timeRange])
-                let restStr = String(line[restRange])
-                
-                currentTimestamp = Self.parseDate(dateString: dateStr, timeString: timeStr)
-                
-                // Parse Sender vs System Message
-                // Check if there is a colon and that it's followed by a space, which is the standard "Sender: " format
-                if let colonRange = restStr.range(of: ": ") {
-                    let sender = String(restStr[..<colonRange.lowerBound])
-                    let body = String(restStr[colonRange.upperBound...])
-                    
-                    currentSender = sender
-                    currentBody = body
+
+            if let match = matchLine(line, using: regexes) {
+                commitCurrentMessage()
+
+                currentTimestamp = Self.parseDate(dateString: match.date, timeString: match.time)
+                if let colonRange = match.rest.range(of: ": ") {
+                    currentSender = String(match.rest[..<colonRange.lowerBound])
+                    currentBody = String(match.rest[colonRange.upperBound...])
                     currentIsSystem = false
                 } else {
                     currentSender = nil
-                    currentBody = restStr
+                    currentBody = match.rest
                     currentIsSystem = true
                 }
-                
                 currentRawText = line
-                
+            } else if currentRawText.isEmpty {
+                warnings.append(.unparseableLine(line, index))
             } else {
-                // Continuation line or unparseable line
-                if currentRawText.isEmpty {
-                    // This means the very first line didn't match the regex.
-                    warnings.append(.unparseableLine(line, index))
-                } else {
-                    currentBody += "\n" + line
-                    currentRawText += "\n" + line
-                }
+                currentBody += "\n" + line
+                currentRawText += "\n" + line
             }
         }
-        
-        commitCurrentMessage() // commit last
-        
+
+        commitCurrentMessage()
+
         return ParsedChat(messages: messages, participants: Array(participants).sorted(), warnings: warnings)
     }
-    
+
+    private struct LineMatch {
+        let date: String
+        let time: String
+        let rest: String
+    }
+
+    private func matchLine(_ line: String, using regexes: [NSRegularExpression]) -> LineMatch? {
+        let nsRange = NSRange(line.startIndex..<line.endIndex, in: line)
+        for regex in regexes {
+            guard let match = regex.firstMatch(in: line, options: [], range: nsRange),
+                  match.numberOfRanges == 4,
+                  let dateRange = Range(match.range(at: 1), in: line),
+                  let timeRange = Range(match.range(at: 2), in: line),
+                  let restRange = Range(match.range(at: 3), in: line) else {
+                continue
+            }
+            return LineMatch(
+                date: String(line[dateRange]),
+                time: String(line[timeRange]),
+                rest: String(line[restRange])
+            )
+        }
+        return nil
+    }
+
+    private struct MediaInfo {
+        let displayBody: String
+        let fileName: String?
+        let mediaType: MediaType?
+        let isPlaceholder: Bool
+    }
+
+    private static func parseMedia(from body: String) -> MediaInfo {
+        if body.contains("<Media omitted>") {
+            return MediaInfo(displayBody: body, fileName: nil, mediaType: nil, isPlaceholder: true)
+        }
+
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        let attachedPattern = #"^(.+?)\s+\((?:file attached|attached file|archivo adjunto|fichier joint)\)$"#
+        if let regex = try? NSRegularExpression(pattern: attachedPattern, options: [.caseInsensitive]),
+           let match = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)),
+           let fileRange = Range(match.range(at: 1), in: trimmed) {
+            let fileName = String(trimmed[fileRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let mediaType = MediaType.infer(from: fileName)
+            return MediaInfo(displayBody: fileName, fileName: fileName, mediaType: mediaType, isPlaceholder: false)
+        }
+
+        let knownPrefixPattern = #"^((?:IMG|VID|PTT|STK|AUD|DOC)-[\w\-. ]+\.(?:jpg|jpeg|png|webp|gif|mp4|mov|opus|m4a|mp3|pdf|docx?|xlsx?|pptx?))$"#
+        if let regex = try? NSRegularExpression(pattern: knownPrefixPattern, options: [.caseInsensitive]),
+           regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)) != nil {
+            let mediaType = MediaType.infer(from: trimmed)
+            return MediaInfo(displayBody: trimmed, fileName: trimmed, mediaType: mediaType, isPlaceholder: false)
+        }
+
+        return MediaInfo(displayBody: body, fileName: nil, mediaType: nil, isPlaceholder: false)
+    }
+
     private static func parseDate(dateString: String, timeString: String) -> Date? {
-        // Handle varying date separators (replace with slash for easier parsing)
-        let normalizedDateStr = dateString.replacingOccurrences(of: "-", with: "/").replacingOccurrences(of: ".", with: "/")
-        let normalizedFullString = "\(normalizedDateStr) \(timeString)"
-        
+        let normalizedDateStr = dateString
+            .replacingOccurrences(of: "-", with: "/")
+            .replacingOccurrences(of: ".", with: "/")
+        let normalizedTime = timeString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedFullString = "\(normalizedDateStr) \(normalizedTime)"
+
         let formats = [
             "MM/dd/yy h:mm a",
             "dd/MM/yy h:mm a",
@@ -109,19 +145,23 @@ public struct WhatsAppChatParser {
             "MM/dd/yy HH:mm",
             "dd/MM/yy HH:mm",
             "MM/dd/yyyy HH:mm",
-            "dd/MM/yyyy HH:mm"
+            "dd/MM/yyyy HH:mm",
+            "MM/dd/yyyy HH:mm:ss",
+            "dd/MM/yyyy HH:mm:ss",
+            "MM/dd/yy HH:mm:ss",
+            "dd/MM/yy HH:mm:ss",
         ]
-        
+
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        
+
         for format in formats {
             formatter.dateFormat = format
             if let date = formatter.date(from: normalizedFullString) {
                 return date
             }
         }
-        
+
         return nil
     }
 }

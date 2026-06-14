@@ -35,6 +35,10 @@ final class MessageScrollCoordinator {
     func scrollToTop() { scrollToTopAction?() }
     func scrollToBottom() { scrollToBottomAction?() }
 
+    func scrollToMessage(_ id: UUID) {
+        scrollToMessageAction?(id)
+    }
+
     func navigateSearch(direction: Int, onHighlight: (UUID) -> Void) {
         guard !searchResults.isEmpty else { return }
         searchResultIndex = (searchResultIndex + direction + searchResults.count) % searchResults.count
@@ -48,13 +52,42 @@ struct ChatViewerView: View {
     let archive: ChatArchive
     @Binding var selectedArchive: ChatArchive?
 
+    @Environment(\.chatStore) private var chatStore
+    @Query private var archiveMessages: [ChatMessage]
+
     @State private var searchText: String = ""
     @State private var showArchiveDetails = false
+    @State private var showMediaInspector = false
     @State private var highlightedMessageID: UUID?
     @State private var scrollCoordinator = MessageScrollCoordinator()
 
+    init(archive: ChatArchive, selectedArchive: Binding<ChatArchive?>) {
+        self.archive = archive
+        self._selectedArchive = selectedArchive
+
+        let archiveId = archive.id
+        self._archiveMessages = Query(
+            filter: #Predicate<ChatMessage> { message in
+                message.chatArchive?.id == archiveId
+            },
+            sort: \ChatMessage.sequenceIndex,
+            order: .forward
+        )
+    }
+
     private var chatLayout: ChatLayout {
         ChatLayout(archive: archive)
+    }
+
+    private var linkedMessagesByFileName: [String: ChatMessage] {
+        Dictionary(uniqueKeysWithValues: archiveMessages.compactMap { message in
+            guard let fileName = message.mediaFileName else { return nil }
+            return (fileName, message)
+        })
+    }
+
+    private var hasMediaLibrary: Bool {
+        archive.mediaFileCount > 0 || archive.storageDirectory != nil
     }
 
     var body: some View {
@@ -74,55 +107,79 @@ struct ChatViewerView: View {
                 }
             }
         )
-        .id("\(archive.id)-\(searchText)")
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if scrollCoordinator.isSearching, scrollCoordinator.searchResultCount > 0 {
+                SearchResultsBar(
+                    resultCount: scrollCoordinator.searchResultCount,
+                    onPrevious: {
+                        scrollCoordinator.navigateSearch(direction: -1, onHighlight: highlight)
+                    },
+                    onNext: {
+                        scrollCoordinator.navigateSearch(direction: 1, onHighlight: highlight)
+                    }
+                )
+            }
+        }
         .navigationTitle(archive.title)
         .searchable(text: $searchText, prompt: "Search messages or sender")
         .toolbar {
-            if scrollCoordinator.isSearching {
-                ToolbarItem(placement: .automatic) {
-                    Text("\(scrollCoordinator.searchResultCount) result\(scrollCoordinator.searchResultCount == 1 ? "" : "s")")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            ToolbarItemGroup(placement: .automatic) {
-                if scrollCoordinator.isSearching {
-                    if scrollCoordinator.searchResultCount > 0 {
-                        Button {
-                            scrollCoordinator.navigateSearch(direction: -1, onHighlight: highlight)
-                        } label: {
-                            Label("Previous Result", systemImage: "chevron.up")
-                        }
-                        Button {
-                            scrollCoordinator.navigateSearch(direction: 1, onHighlight: highlight)
-                        } label: {
-                            Label("Next Result", systemImage: "chevron.down")
-                        }
-                    }
-                } else if scrollCoordinator.messageCount > 20 {
+            if !scrollCoordinator.isSearching, scrollCoordinator.messageCount > 20 {
+                ToolbarItemGroup(placement: .primaryAction) {
                     Button {
                         scrollCoordinator.scrollToTop()
                     } label: {
-                        Label("Jump to Earliest", systemImage: "arrow.up.to.line")
+                        Image(systemName: "arrow.up.to.line")
                     }
+                    .help("Jump to Earliest")
+
                     Button {
                         scrollCoordinator.scrollToBottom()
                     } label: {
-                        Label("Jump to Latest", systemImage: "arrow.down.to.line")
+                        Image(systemName: "arrow.down.to.line")
                     }
+                    .help("Jump to Latest")
                 }
+            }
+
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     showArchiveDetails = true
                 } label: {
-                    Label("Archive Details", systemImage: "info.circle")
+                    Image(systemName: "info.circle")
+                }
+                .help("Archive Details")
+            }
+
+            if hasMediaLibrary {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showMediaInspector.toggle()
+                    } label: {
+                        Image(systemName: "photo.on.rectangle.angled")
+                    }
+                    .help("Media Inspector")
                 }
             }
         }
+        .inspector(isPresented: $showMediaInspector) {
+            if let chatStore {
+                MediaInspectorView(
+                    archive: archive,
+                    mediaItems: chatStore.mediaItems(for: archive),
+                    linkedMessages: linkedMessagesByFileName,
+                    onSelectMessage: { id in
+                        scrollCoordinator.scrollToMessage(id)
+                        highlight(id)
+                    }
+                )
+            }
+        }
+        .inspectorColumnWidth(min: 240, ideal: 280, max: 360)
         .sheet(isPresented: $showArchiveDetails) {
             ArchiveDetailsView(archive: archive, selectedArchive: $selectedArchive)
         }
         .onChange(of: searchText) { _, newValue in
-            scrollCoordinator.isSearching = !newValue.isEmpty
+            scrollCoordinator.isSearching = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             scrollCoordinator.searchResultIndex = 0
         }
     }
@@ -186,10 +243,19 @@ struct MessageListView: View {
     let scrollCoordinator: MessageScrollCoordinator
     let onHighlight: (UUID) -> Void
 
-    @Query private var messages: [ChatMessage]
+    @Query private var allMessages: [ChatMessage]
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var hasScrolledToBottomOnAppear = false
+
+    private var messages: [ChatMessage] {
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return allMessages }
+        return allMessages.filter { message in
+            message.body.localizedStandardContains(trimmed) ||
+            (message.senderName?.localizedStandardContains(trimmed) ?? false)
+        }
+    }
 
     init(
         archive: ChatArchive,
@@ -207,27 +273,13 @@ struct MessageListView: View {
         self.onHighlight = onHighlight
 
         let archiveId = archive.id
-        let queryText = searchText
-
-        if queryText.isEmpty {
-            self._messages = Query(
-                filter: #Predicate<ChatMessage> { message in
-                    message.chatArchive?.id == archiveId
-                },
-                sort: \ChatMessage.sequenceIndex,
-                order: .forward
-            )
-        } else {
-            self._messages = Query(
-                filter: #Predicate<ChatMessage> { message in
-                    message.chatArchive?.id == archiveId &&
-                    (message.body.localizedStandardContains(queryText) ||
-                     (message.senderName != nil && message.senderName!.localizedStandardContains(queryText)))
-                },
-                sort: \ChatMessage.sequenceIndex,
-                order: .forward
-            )
-        }
+        self._allMessages = Query(
+            filter: #Predicate<ChatMessage> { message in
+                message.chatArchive?.id == archiveId
+            },
+            sort: \ChatMessage.sequenceIndex,
+            order: .forward
+        )
     }
 
     private var sections: [MessageSection] {
@@ -268,7 +320,7 @@ struct MessageListView: View {
     var body: some View {
         ScrollViewReader { proxy in
             Group {
-                if messages.isEmpty && !searchText.isEmpty {
+                if messages.isEmpty && !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     EmptyStateView(
                         symbol: "magnifyingglass",
                         title: "No Results",
@@ -286,7 +338,8 @@ struct MessageListView: View {
                                     MessageRow(
                                         message: message,
                                         chatLayout: chatLayout,
-                                        isHighlighted: highlightedMessageID == message.id
+                                        isHighlighted: highlightedMessageID == message.id,
+                                        storageDirectory: archive.storageDirectory
                                     )
                                     .id(message.id)
                                 }
@@ -314,21 +367,22 @@ struct MessageListView: View {
                         proxy.scrollTo(id, anchor: .center)
                     }
                 )
-                scrollCoordinator.messageCount = messages.count
-                scrollCoordinator.isSearching = !searchText.isEmpty
+                scrollCoordinator.messageCount = allMessages.count
+                scrollCoordinator.isSearching = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 scrollCoordinator.updateSearchResults(messages.map(\.id))
                 scrollToBottomIfNeeded(proxy: proxy)
             }
-            .onChange(of: messages.count) { _, newCount in
-                scrollCoordinator.messageCount = newCount
+            .onChange(of: allMessages.count) { _, _ in
+                scrollCoordinator.messageCount = allMessages.count
                 scrollCoordinator.updateSearchResults(messages.map(\.id))
             }
             .onChange(of: searchText) { oldValue, newValue in
-                scrollCoordinator.isSearching = !newValue.isEmpty
+                scrollCoordinator.isSearching = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                scrollCoordinator.updateSearchResults(messages.map(\.id))
                 if oldValue.isEmpty && !newValue.isEmpty {
                     hasScrolledToBottomOnAppear = true
                 }
-                if newValue.isEmpty, let lastMessage = messages.last {
+                if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let lastMessage = allMessages.last {
                     proxy.scrollTo(lastMessage.id, anchor: .bottom)
                 }
             }
@@ -340,7 +394,9 @@ struct MessageListView: View {
     }
 
     private func scrollToBottomIfNeeded(proxy: ScrollViewProxy) {
-        guard searchText.isEmpty, !hasScrolledToBottomOnAppear, let lastMessage = messages.last else { return }
+        guard searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !hasScrolledToBottomOnAppear,
+              let lastMessage = allMessages.last else { return }
         proxy.scrollTo(lastMessage.id, anchor: .bottom)
         hasScrolledToBottomOnAppear = true
     }
@@ -350,11 +406,17 @@ struct MessageRow: View {
     let message: ChatMessage
     let chatLayout: ChatLayout
     let isHighlighted: Bool
+    let storageDirectory: String?
 
     @Environment(\.colorScheme) private var colorScheme
 
     private var isRightAligned: Bool {
         chatLayout.isRightAligned(message)
+    }
+
+    private var resolvedMediaURL: URL? {
+        guard let fileName = message.mediaFileName else { return nil }
+        return ArchiveStorage.resolveMediaURL(fileName: fileName, in: storageDirectory)
     }
 
     var body: some View {
@@ -388,6 +450,16 @@ struct MessageRow: View {
                         HStack(spacing: 4) {
                             Image(systemName: "photo")
                             Text("Media omitted")
+                        }
+                        .font(.body)
+                        .foregroundStyle(ChatVaultTheme.mediaPlaceholder)
+                        .italic()
+                    } else if let mediaURL = resolvedMediaURL, message.hasResolvableMedia {
+                        InlineMediaView(message: message, mediaURL: mediaURL)
+                    } else if message.hasResolvableMedia {
+                        HStack(spacing: 4) {
+                            Image(systemName: message.mediaType?.systemImage ?? "paperclip")
+                            Text(message.mediaFileName ?? "Attachment unavailable")
                         }
                         .font(.body)
                         .foregroundStyle(ChatVaultTheme.mediaPlaceholder)

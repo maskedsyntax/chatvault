@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UniformTypeIdentifiers
 
 struct ArchiveListView: View {
     @Environment(\.modelContext) private var modelContext
@@ -11,6 +12,7 @@ struct ArchiveListView: View {
     @State private var isImporting = false
     @State private var importError: Error?
     @State private var showError = false
+    @State private var isDropTargeted = false
 
     @State private var pendingImport: ChatStore.ParsedImport?
     @State private var pendingDuplicate: ChatArchive?
@@ -49,7 +51,6 @@ struct ArchiveListView: View {
                 }
             }
         }
-        .navigationTitle("Archives")
         .navigationSplitViewColumnWidth(min: 240, ideal: 280)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -60,18 +61,31 @@ struct ArchiveListView: View {
         }
         .fileImporter(
             isPresented: $isImporting,
-            allowedContentTypes: [.plainText],
+            allowedContentTypes: [.plainText, .zip],
             allowsMultipleSelection: false
         ) { result in
             handleImport(result: result)
         }
-        .sheet(item: $pendingImport) { item in
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers: providers)
+        }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [6]))
+                    .foregroundStyle(.secondary)
+                    .padding(8)
+                    .allowsHitTesting(false)
+            }
+        }
+        .sheet(item: $pendingImport, onDismiss: cleanupPendingImport) { item in
             ImportPreviewView(
                 parsedImport: item,
                 possibleDuplicate: pendingDuplicate
             ) { archive in
                 selectedArchive = archive
                 pendingDuplicate = nil
+                pendingImport = nil
             }
         }
         .alert("Import Error", isPresented: $showError) {
@@ -122,24 +136,58 @@ struct ArchiveListView: View {
     private func handleImport(result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
-            guard let url = urls.first, let chatStore else { return }
-            Task {
-                do {
-                    let parsedImport = try await chatStore.parseChat(from: url)
-                    pendingDuplicate = chatStore.findPossibleDuplicate(
-                        sourceFileName: parsedImport.sourceFileName,
-                        messageCount: parsedImport.parsed.messages.count
-                    )
-                    pendingImport = parsedImport
-                } catch {
-                    importError = error
-                    showError = true
-                }
-            }
+            guard let url = urls.first else { return }
+            importURL(url)
         case .failure(let error):
             importError = error
             showError = true
         }
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) else {
+            return false
+        }
+
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+            guard let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) else {
+                return
+            }
+            Task { @MainActor in
+                importURL(url)
+            }
+        }
+        return true
+    }
+
+    private func importURL(_ url: URL) {
+        guard let chatStore else { return }
+        let ext = url.pathExtension.lowercased()
+        guard ext == "txt" || ext == "zip" else {
+            importError = ChatStore.ImportError.fileUnreadable
+            showError = true
+            return
+        }
+
+        Task {
+            do {
+                let parsedImport = try await chatStore.parseImport(from: url)
+                pendingDuplicate = chatStore.findPossibleDuplicate(
+                    sourceFileName: parsedImport.sourceFileName,
+                    messageCount: parsedImport.parsed.messages.count
+                )
+                pendingImport = parsedImport
+            } catch {
+                importError = error
+                showError = true
+            }
+        }
+    }
+
+    private func cleanupPendingImport() {
+        pendingImport?.cleanupTemporaryFiles()
+        pendingImport = nil
+        pendingDuplicate = nil
     }
 
     private func renameArchive() {
@@ -161,11 +209,8 @@ struct ArchiveListView: View {
         if selectedArchive?.id == archive.id {
             selectedArchive = nil
         }
+        chatStore?.deleteArchiveFiles(for: archive)
         modelContext.delete(archive)
         try? modelContext.save()
     }
-}
-
-extension ChatStore.ParsedImport: Identifiable {
-    public var id: String { "\(sourceFileName)-\(parsed.messages.count)-\(encodingName)" }
 }

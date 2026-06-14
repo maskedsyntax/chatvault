@@ -15,6 +15,32 @@ final class WhatsAppChatParserTests: XCTestCase {
         super.tearDown()
     }
     
+    func testParseAndroidBracketFormat() {
+        let text = """
+        [16/03/2024, 09:14:22] Maria: Hello from Android
+        """
+
+        let chat = parser.parse(text: text)
+
+        XCTAssertEqual(chat.messages.count, 1)
+        XCTAssertEqual(chat.messages[0].senderName, "Maria")
+        XCTAssertEqual(chat.messages[0].body, "Hello from Android")
+        XCTAssertNotNil(chat.messages[0].timestamp)
+    }
+
+    func testParseFileAttachedMedia() {
+        let text = """
+        12/05/24, 9:42 PM - Aftaab: IMG-20240316-WA0001.jpg (file attached)
+        """
+
+        let chat = parser.parse(text: text)
+
+        XCTAssertEqual(chat.messages.count, 1)
+        XCTAssertEqual(chat.messages[0].mediaFileName, "IMG-20240316-WA0001.jpg")
+        XCTAssertEqual(chat.messages[0].mediaType, .image)
+        XCTAssertFalse(chat.messages[0].isMediaPlaceholder)
+    }
+
     func testParseBasic12HourFormat() {
         let text = """
         12/05/24, 9:42 PM - Aftaab: Hey, are you free?

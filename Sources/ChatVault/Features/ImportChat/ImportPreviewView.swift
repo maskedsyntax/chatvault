@@ -99,6 +99,12 @@ struct ImportPreviewView: View {
                     LabeledContent("Date Range", value: dateRangeText)
                     LabeledContent("Encoding", value: parsedImport.encodingName)
                     LabeledContent("Source File", value: parsedImport.sourceFileName)
+                    if parsedImport.mediaFileCount > 0 {
+                        LabeledContent("Media Files", value: "\(parsedImport.mediaFileCount)")
+                    }
+                    if parsed.attachedMediaCount > 0 {
+                        LabeledContent("Linked Attachments", value: "\(parsed.attachedMediaCount)")
+                    }
                 }
 
                 if parsed.messages.count >= 10_000 {
@@ -126,7 +132,7 @@ struct ImportPreviewView: View {
                                         .fontWeight(.semibold)
                                         .foregroundStyle(.secondary)
                                 }
-                                Text(message.isMediaPlaceholder ? "Media omitted" : message.body)
+                                Text(sampleText(for: message))
                                     .font(.subheadline)
                                     .lineLimit(3)
                             }
@@ -162,6 +168,12 @@ struct ImportPreviewView: View {
         .frame(minWidth: 480, minHeight: 520)
     }
 
+    private func sampleText(for message: ParsedMessage) -> String {
+        if message.isMediaPlaceholder { return "Media omitted" }
+        if let fileName = message.mediaFileName { return fileName }
+        return message.body
+    }
+
     private func performImport() {
         guard let chatStore else { return }
         isImporting = true
@@ -170,9 +182,8 @@ struct ImportPreviewView: View {
         Task {
             do {
                 let archive = try chatStore.saveArchive(
-                    parsed: parsed,
-                    title: trimmedTitle,
-                    sourceFileName: parsedImport.sourceFileName
+                    from: parsedImport,
+                    title: trimmedTitle
                 )
                 onImport(archive)
                 dismiss()

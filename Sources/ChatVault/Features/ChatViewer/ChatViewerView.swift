@@ -260,14 +260,14 @@ struct ChatLayout {
     }
 
     func isRightAligned(_ message: ChatMessage) -> Bool {
-        guard !isGroupChat, let sender = message.senderName, let rightAlignedSender else {
+        guard let sender = message.senderName, let rightAlignedSender else {
             return false
         }
         return sender == rightAlignedSender
     }
 
     func shouldShowSenderName(_ message: ChatMessage, isRightAligned: Bool) -> Bool {
-        (isGroupChat || archive.participantRecords.count > 2) && !isRightAligned && message.senderName != nil
+        isGroupChat && !isRightAligned && message.senderName != nil
     }
 }
 
@@ -342,7 +342,7 @@ struct MessageListView: View {
                                     )
                                     .id(message.id)
                                     .listRowSeparator(.hidden)
-                                    .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+                                    .listRowInsets(EdgeInsets(top: 1, leading: 10, bottom: 1, trailing: 10))
                                     .listRowBackground(Color.clear)
                                 }
                             } header: {
@@ -353,6 +353,14 @@ struct MessageListView: View {
                                         .frame(maxWidth: .infinity)
                                 }
                             }
+                        }
+
+                        Section {
+                            Color.clear
+                                .frame(height: 24)
+                                .listRowSeparator(.hidden)
+                                .listRowInsets(EdgeInsets())
+                                .listRowBackground(Color.clear)
                         }
                     }
                     .listStyle(.plain)
@@ -509,8 +517,17 @@ struct MessageRow: View {
 
     @Environment(\.colorScheme) private var colorScheme
 
+    private static let maxBubbleWidth: CGFloat = 480
+    private static let edgeMargin: CGFloat = 56
+    private static let bubbleHPadding: CGFloat = 12
+    private static let bubbleVPadding: CGFloat = 8
+
     private var isRightAligned: Bool {
         chatLayout.isRightAligned(message)
+    }
+
+    private var bubbleStyle: ChatBubbleShape.Style {
+        isRightAligned ? .sent : .received
     }
 
     private var resolvedMediaURL: URL? {
@@ -531,85 +548,164 @@ struct MessageRow: View {
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity, alignment: .center)
         } else {
-            HStack {
+            HStack(alignment: .bottom, spacing: 0) {
                 if isRightAligned {
-                    Spacer(minLength: 50)
+                    Spacer(minLength: Self.edgeMargin)
                 }
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     if chatLayout.shouldShowSenderName(message, isRightAligned: isRightAligned),
                        let sender = message.senderName {
                         Text(chatLayout.displayName(for: sender) ?? sender)
                             .font(.caption)
                             .fontWeight(.semibold)
                             .foregroundStyle(ParticipantColor.color(for: sender))
+                            .padding(.leading, 2)
                     }
 
-                    if message.isDeletedMessage {
-                        HStack(spacing: 4) {
-                            Image(systemName: "nosign")
-                            Text("Message deleted")
-                        }
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                        .italic()
-                    } else if message.isMediaPlaceholder {
-                        HStack(spacing: 4) {
-                            Image(systemName: "photo")
-                            Text("Media omitted")
-                        }
-                        .font(.body)
-                        .foregroundStyle(ChatVaultTheme.mediaPlaceholder)
-                        .italic()
-                    } else if let mediaURL = resolvedMediaURL, message.hasResolvableMedia {
-                        InlineMediaView(message: message, mediaURL: mediaURL)
-                    } else if message.hasResolvableMedia {
-                        HStack(spacing: 4) {
-                            Image(systemName: message.mediaType?.systemImage ?? "paperclip")
-                            Text(message.mediaFileName ?? "Attachment unavailable")
-                        }
-                        .font(.body)
-                        .foregroundStyle(ChatVaultTheme.mediaPlaceholder)
-                        .italic()
-                    } else {
-                        Text(message.body)
-                            .font(.body)
-                            .foregroundStyle(.primary)
-                            .textSelection(.enabled)
-                    }
-
-                    if let date = message.timestamp {
-                        Text(date.formatted(date: .omitted, time: .shortened))
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                            .padding(.top, 2)
-                    }
+                    bubbleBody
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(bubbleColor)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .shadow(color: .black.opacity(0.05), radius: 1, x: 0, y: 1)
-                .overlay {
-                    if isHighlighted {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(ChatVaultTheme.highlightFlash)
-                    }
-                }
+                .frame(maxWidth: Self.maxBubbleWidth, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
 
                 if !isRightAligned {
-                    Spacer(minLength: 50)
+                    Spacer(minLength: Self.edgeMargin)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: isRightAligned ? .trailing : .leading)
-            .padding(.vertical, 2)
+            .padding(.vertical, 1)
         }
+    }
+
+    private var bubbleBody: some View {
+        bubbleContent
+            .background(bubbleColor)
+            .clipShape(ChatBubbleShape(style: bubbleStyle))
+            .overlay {
+                if isHighlighted {
+                    ChatBubbleShape(style: bubbleStyle)
+                        .fill(ChatVaultTheme.highlightFlash)
+                }
+            }
+            .shadow(
+                color: bubbleShadowColor,
+                radius: colorScheme == .dark ? 0 : 2,
+                x: 0,
+                y: 1
+            )
+    }
+
+    @ViewBuilder
+    private var bubbleContent: some View {
+        Group {
+            if message.isDeletedMessage {
+                textBubble(
+                    HStack(spacing: 4) {
+                        Image(systemName: "nosign")
+                        Text("Message deleted")
+                    }
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .italic()
+                )
+            } else if message.isMediaPlaceholder {
+                textBubble(
+                    HStack(spacing: 4) {
+                        Image(systemName: "photo")
+                        Text("Media omitted")
+                    }
+                    .font(.body)
+                    .foregroundStyle(ChatVaultTheme.mediaPlaceholder)
+                    .italic()
+                )
+            } else if let mediaURL = resolvedMediaURL, message.hasResolvableMedia {
+                mediaBubble(InlineMediaView(message: message, mediaURL: mediaURL))
+            } else if message.hasResolvableMedia {
+                textBubble(
+                    HStack(spacing: 4) {
+                        Image(systemName: message.mediaType?.systemImage ?? "paperclip")
+                        Text(message.mediaFileName ?? "Attachment unavailable")
+                    }
+                    .font(.body)
+                    .foregroundStyle(ChatVaultTheme.mediaPlaceholder)
+                    .italic()
+                )
+            } else {
+                textBubble(
+                    Text(message.body)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.leading)
+                        .textSelection(.enabled)
+                )
+            }
+        }
+        .padding(.horizontal, Self.bubbleHPadding)
+        .padding(.vertical, Self.bubbleVPadding)
+    }
+
+    @ViewBuilder
+    private func textBubble<Content: View>(_ content: Content) -> some View {
+        content
+            .frame(maxWidth: Self.maxBubbleWidth - Self.bubbleHPadding * 2, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.trailing, message.timestamp == nil ? 0 : timestampReserveWidth)
+            .overlay(alignment: .bottomTrailing) {
+                if let date = message.timestamp {
+                    timestampView(date)
+                }
+            }
+    }
+
+    @ViewBuilder
+    private func mediaBubble<Content: View>(_ content: Content) -> some View {
+        content
+            .overlay(alignment: .bottomTrailing) {
+                if let date = message.timestamp {
+                    timestampView(date)
+                        .padding(6)
+                        .background(Color.black.opacity(0.45))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .padding(6)
+                }
+            }
+    }
+
+    private func timestampView(_ date: Date) -> some View {
+        HStack(spacing: 3) {
+            Text(date.formatted(date: .omitted, time: .shortened))
+                .font(.system(size: 11))
+                .foregroundStyle(timestampColor)
+
+            if isRightAligned {
+                HStack(spacing: -4) {
+                    Image(systemName: "checkmark")
+                    Image(systemName: "checkmark")
+                }
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(ChatVaultTheme.sentCheckmark)
+            }
+        }
+    }
+
+    private var timestampReserveWidth: CGFloat {
+        isRightAligned ? 62 : 44
     }
 
     private var bubbleColor: Color {
         isRightAligned
             ? ChatVaultTheme.sentBubble(for: colorScheme)
             : ChatVaultTheme.receivedBubble(for: colorScheme)
+    }
+
+    private var bubbleShadowColor: Color {
+        isRightAligned
+            ? ChatVaultTheme.sentBubbleShadow(for: colorScheme)
+            : ChatVaultTheme.receivedBubbleShadow(for: colorScheme)
+    }
+
+    private var timestampColor: Color {
+        colorScheme == .dark
+            ? Color.white.opacity(0.55)
+            : Color.black.opacity(0.45)
     }
 }

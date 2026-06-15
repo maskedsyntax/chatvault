@@ -3,20 +3,42 @@ import SwiftUI
 enum ChatVaultTheme {
     static func chatBackground(for colorScheme: ColorScheme) -> Color {
         colorScheme == .dark
-            ? Color(red: 0.08, green: 0.08, blue: 0.09)
-            : Color(red: 0.93, green: 0.93, blue: 0.91)
+            ? Color(red: 0.04, green: 0.08, blue: 0.10)
+            : Color(red: 0.90, green: 0.87, blue: 0.84)
     }
 
     static func sentBubble(for colorScheme: ColorScheme) -> Color {
         colorScheme == .dark
-            ? Color(red: 0.0, green: 0.36, blue: 0.29)
-            : Color(red: 0.86, green: 0.97, blue: 0.78)
+            ? Color(red: 0.02, green: 0.28, blue: 0.25)
+            : Color(red: 0.85, green: 0.98, blue: 0.76)
     }
 
     static func receivedBubble(for colorScheme: ColorScheme) -> Color {
         colorScheme == .dark
-            ? Color(red: 0.15, green: 0.15, blue: 0.15)
+            ? Color(red: 0.125, green: 0.173, blue: 0.2)
             : Color.white
+    }
+
+    static func receivedBubbleBorder(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark
+            ? Color.white.opacity(0.06)
+            : Color.black.opacity(0.06)
+    }
+
+    static func sentBubbleShadow(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark
+            ? Color.clear
+            : Color(red: 0.2, green: 0.45, blue: 0.15).opacity(0.12)
+    }
+
+    static func receivedBubbleShadow(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark
+            ? Color.clear
+            : Color.black.opacity(0.08)
+    }
+
+    static var sentCheckmark: Color {
+        Color(red: 0.34, green: 0.72, blue: 0.98)
     }
 
     static func systemPill(for colorScheme: ColorScheme) -> Color {

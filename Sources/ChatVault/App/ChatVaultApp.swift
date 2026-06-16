@@ -49,7 +49,7 @@ struct ContentView: View {
     @Query(sort: \ChatArchive.importedAt, order: .reverse) private var archives: [ChatArchive]
 
     @State private var chatStore: ChatStore?
-    @State private var selectedArchive: ChatArchive?
+    @State private var selectedArchiveID: UUID?
     @State private var birthdayReminders: [BirthdayReminder] = []
 
     var body: some View {
@@ -66,20 +66,24 @@ struct ContentView: View {
                 .padding(.bottom, 8)
 
                 BirthdaysTodayView(reminders: birthdayReminders) { reminder in
-                    if let archive = archives.first(where: { $0.id == reminder.archiveID }) {
-                        selectedArchive = archive
-                    }
+                    selectedArchiveID = reminder.archiveID
                 }
 
-                ArchiveListView(selectedArchive: $selectedArchive)
+                ArchiveListView(selectedArchiveID: $selectedArchiveID)
             }
         } detail: {
             NavigationStack {
-                if let archive = selectedArchive {
-                    ChatViewerView(archive: archive, selectedArchive: $selectedArchive)
+                if let selectedArchiveID,
+                   let archive = archives.first(where: { $0.id == selectedArchiveID }) {
+                    ChatViewerView(archive: archive, selectedArchiveID: $selectedArchiveID)
                 } else {
                     SelectArchivePlaceholder(hasArchives: !archives.isEmpty)
                 }
+            }
+        }
+        .onChange(of: archives.map(\.id)) { _, archiveIDs in
+            if let selectedArchiveID, !archiveIDs.contains(selectedArchiveID) {
+                self.selectedArchiveID = nil
             }
         }
         .onAppear {

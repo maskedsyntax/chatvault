@@ -31,7 +31,6 @@ playground.xcworkspace
 
 .build/
 build/
-Resources/AppIcon.icns
 
 # CocoaPods
 #

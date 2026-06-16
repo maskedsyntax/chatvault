@@ -8,7 +8,7 @@ struct ArchiveDetailsView: View {
     @Environment(\.chatStore) private var chatStore
 
     let archive: ChatArchive
-    @Binding var selectedArchive: ChatArchive?
+    @Binding var selectedArchiveID: UUID?
 
     @State private var showRenameAlert = false
     @State private var renameTitle: String = ""
@@ -137,14 +137,13 @@ struct ArchiveDetailsView: View {
                 titleVisibility: .visible
             ) {
                 Button("Delete", role: .destructive) {
-                    if selectedArchive?.id == archive.id {
-                        selectedArchive = nil
-                    }
-                    chatStore?.deleteArchiveFiles(for: archive)
-                    try? chatStore?.deleteSearchIndex(for: archive)
-                    modelContext.delete(archive)
-                    try? modelContext.save()
+                    let archiveID = archive.id
                     dismiss()
+                    chatStore?.scheduleArchiveDeletion(id: archiveID) {
+                        if selectedArchiveID == archiveID {
+                            selectedArchiveID = nil
+                        }
+                    }
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {

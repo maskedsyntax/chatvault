@@ -6,7 +6,8 @@ public final class ChatStore {
     private let modelContext: ModelContext
     private let parser: WhatsAppChatParser
 
-    private static let messageBatchSize = 500
+    private static let messageBatchSize = 2_000
+    private static let deletionBatchSize = 500
 
     public init(modelContext: ModelContext) {
         self.modelContext = modelContext
@@ -151,10 +152,10 @@ public final class ChatStore {
         )
 
         modelContext.insert(archive)
-        let insertedMessages = try insertMessages(parsedImport.parsed.messages, into: archive)
+        let indexedMessages = try insertMessages(parsedImport.parsed.messages, into: archive)
         try applyParticipants(configuration.participants, to: archive)
         try modelContext.save()
-        try rebuildSearchIndex(for: archive.id, messages: insertedMessages)
+        scheduleSearchIndexRebuild(for: archive.id, messages: indexedMessages)
         return archive
     }
 
@@ -181,16 +182,7 @@ public final class ChatStore {
         deleteArchiveFiles(for: archive)
         try deleteSearchIndex(for: archive)
 
-        let existingMessages = try fetchMessages(for: archive.id)
-        for message in existingMessages {
-            modelContext.delete(message)
-        }
-        archive.messages.removeAll()
-
-        for participant in archive.participantRecords {
-            modelContext.delete(participant)
-        }
-        archive.participantRecords.removeAll()
+        try deleteMessagesAndParticipants(for: archive.id)
 
         var storagePath: String?
         var mediaCount = parsedImport.mediaFileCount
@@ -211,11 +203,10 @@ public final class ChatStore {
         archive.mediaFileCount = mediaCount
         archive.updatedAt = Date()
 
-        try insertMessages(parsedImport.parsed.messages, into: archive)
+        let indexedMessages = try insertMessages(parsedImport.parsed.messages, into: archive)
         try applyParticipants(configuration.participants, to: archive)
         try modelContext.save()
-        let insertedMessages = try fetchMessages(for: archive.id)
-        try rebuildSearchIndex(for: archive.id, messages: insertedMessages)
+        scheduleSearchIndexRebuild(for: archive.id, messages: indexedMessages)
         return archive
     }
 
@@ -251,8 +242,10 @@ public final class ChatStore {
     }
 
     @discardableResult
-    private func insertMessages(_ parsedMessages: [ParsedMessage], into archive: ChatArchive) throws -> [ChatMessage] {
-        var inserted: [ChatMessage] = []
+    private func insertMessages(_ parsedMessages: [ParsedMessage], into archive: ChatArchive) throws -> [MessageSearchIndex.IndexedMessage] {
+        var indexedMessages: [MessageSearchIndex.IndexedMessage] = []
+        indexedMessages.reserveCapacity(parsedMessages.count)
+
         for (index, msg) in parsedMessages.enumerated() {
             let chatMessage = ChatMessage(
                 senderName: msg.senderName,
@@ -268,13 +261,20 @@ public final class ChatStore {
             )
             chatMessage.chatArchive = archive
             modelContext.insert(chatMessage)
-            inserted.append(chatMessage)
+            indexedMessages.append(
+                MessageSearchIndex.IndexedMessage(
+                    id: chatMessage.id,
+                    body: chatMessage.body,
+                    senderName: chatMessage.senderName,
+                    timestamp: chatMessage.timestamp
+                )
+            )
 
             if (index + 1) % Self.messageBatchSize == 0 {
                 try modelContext.save()
             }
         }
-        return inserted
+        return indexedMessages
     }
 
     public func findPossibleDuplicate(sourceFileName: String, messageCount: Int) -> ChatArchive? {
@@ -294,6 +294,26 @@ public final class ChatStore {
 
     public func deleteSearchIndex(for archive: ChatArchive) throws {
         try MessageSearchIndex.shared.deleteIndex(for: archive.id)
+    }
+
+    public func deleteArchive(withID id: UUID) async throws {
+        let descriptor = FetchDescriptor<ChatArchive>(
+            predicate: #Predicate<ChatArchive> { $0.id == id }
+        )
+        guard let archive = try modelContext.fetch(descriptor).first else { return }
+        deleteArchiveFiles(for: archive)
+        try deleteSearchIndex(for: archive)
+        try await deleteMessagesAndParticipantsForDeletion(for: id)
+        modelContext.delete(archive)
+        try modelContext.save()
+    }
+
+    public func scheduleArchiveDeletion(id: UUID, clearSelection: () -> Void) {
+        clearSelection()
+        Task { @MainActor in
+            await Task.yield()
+            try? await deleteArchive(withID: id)
+        }
     }
 
     public func ensureParticipantRecords(for archive: ChatArchive) throws {
@@ -316,6 +336,92 @@ public final class ChatStore {
 
     public func messageDays(for archive: ChatArchive) throws -> [MessageDaySummary] {
         try MessageSearchIndex.shared.messageDays(for: archive.id)
+    }
+
+    public func recentMessages(for archive: ChatArchive, limit: Int) throws -> [ChatMessage] {
+        let archiveID = archive.id
+        var descriptor = FetchDescriptor<ChatMessage>(
+            predicate: #Predicate<ChatMessage> { message in
+                message.chatArchive?.id == archiveID
+            },
+            sortBy: [SortDescriptor(\.sequenceIndex, order: .reverse)]
+        )
+        descriptor.fetchLimit = limit
+        return try modelContext.fetch(descriptor).reversed()
+    }
+
+    public func messagesBefore(
+        archive: ChatArchive,
+        sequenceIndex: Int,
+        limit: Int
+    ) throws -> [ChatMessage] {
+        let archiveID = archive.id
+        var descriptor = FetchDescriptor<ChatMessage>(
+            predicate: #Predicate<ChatMessage> { message in
+                message.chatArchive?.id == archiveID && message.sequenceIndex < sequenceIndex
+            },
+            sortBy: [SortDescriptor(\.sequenceIndex, order: .reverse)]
+        )
+        descriptor.fetchLimit = limit
+        return try modelContext.fetch(descriptor).reversed()
+    }
+
+    public func messageWindow(
+        archive: ChatArchive,
+        containing messageID: UUID,
+        radius: Int
+    ) throws -> [ChatMessage] {
+        let archiveID = archive.id
+        var targetDescriptor = FetchDescriptor<ChatMessage>(
+            predicate: #Predicate<ChatMessage> { message in
+                message.chatArchive?.id == archiveID && message.id == messageID
+            }
+        )
+        targetDescriptor.fetchLimit = 1
+        guard let target = try modelContext.fetch(targetDescriptor).first else { return [] }
+
+        let lowerBound = max(0, target.sequenceIndex - radius)
+        let upperBound = target.sequenceIndex + radius
+        let descriptor = FetchDescriptor<ChatMessage>(
+            predicate: #Predicate<ChatMessage> { message in
+                message.chatArchive?.id == archiveID &&
+                message.sequenceIndex >= lowerBound &&
+                message.sequenceIndex <= upperBound
+            },
+            sortBy: [SortDescriptor(\.sequenceIndex, order: .forward)]
+        )
+        return try modelContext.fetch(descriptor)
+    }
+
+    public func messages(matching ids: [UUID], in archive: ChatArchive) throws -> [ChatMessage] {
+        guard !ids.isEmpty else { return [] }
+        let archiveID = archive.id
+        let idSet = Set(ids)
+        let descriptor = FetchDescriptor<ChatMessage>(
+            predicate: #Predicate<ChatMessage> { message in
+                message.chatArchive?.id == archiveID && idSet.contains(message.id)
+            },
+            sortBy: [SortDescriptor(\.sequenceIndex, order: .forward)]
+        )
+        return try modelContext.fetch(descriptor)
+    }
+
+    public func mediaLinkedMessages(for archive: ChatArchive) throws -> [String: ChatMessage] {
+        let archiveID = archive.id
+        let descriptor = FetchDescriptor<ChatMessage>(
+            predicate: #Predicate<ChatMessage> { message in
+                message.chatArchive?.id == archiveID && message.mediaFileName != nil
+            },
+            sortBy: [SortDescriptor(\.sequenceIndex, order: .forward)]
+        )
+        let messages = try modelContext.fetch(descriptor)
+        return Dictionary(
+            messages.compactMap { message -> (String, ChatMessage)? in
+                guard let fileName = message.mediaFileName else { return nil }
+                return (fileName, message)
+            },
+            uniquingKeysWith: { _, latest in latest }
+        )
     }
 
     public func birthdaysToday() -> [BirthdayReminder] {
@@ -371,18 +477,21 @@ public final class ChatStore {
         let existingDays = try MessageSearchIndex.shared.messageDays(for: archive.id)
         guard existingDays.isEmpty, archive.messageCount > 0 else { return }
         let messages = try fetchMessages(for: archive.id)
-        try rebuildSearchIndex(for: archive.id, messages: messages)
+        let indexedMessages = messages.map(Self.indexedMessage(from:))
+        try rebuildSearchIndex(for: archive.id, messages: indexedMessages)
     }
-    private func rebuildSearchIndex(for archiveID: UUID, messages: [ChatMessage]) throws {
-        let indexedMessages = messages.map { message in
-            MessageSearchIndex.IndexedMessage(
-                id: message.id,
-                body: message.body,
-                senderName: message.senderName,
-                timestamp: message.timestamp
-            )
+
+    private func rebuildSearchIndex(for archiveID: UUID, messages: [MessageSearchIndex.IndexedMessage]) throws {
+        try MessageSearchIndex.shared.rebuildIndex(archiveID: archiveID, messages: messages)
+    }
+
+    private func scheduleSearchIndexRebuild(
+        for archiveID: UUID,
+        messages: [MessageSearchIndex.IndexedMessage]
+    ) {
+        Task { @MainActor in
+            try? rebuildSearchIndex(for: archiveID, messages: messages)
         }
-        try MessageSearchIndex.shared.rebuildIndex(archiveID: archiveID, messages: indexedMessages)
     }
 
     private func fetchMessages(for archiveID: UUID) throws -> [ChatMessage] {
@@ -393,6 +502,62 @@ public final class ChatStore {
             sortBy: [SortDescriptor(\.sequenceIndex, order: .forward)]
         )
         return try modelContext.fetch(descriptor)
+    }
+
+    private func deleteMessagesAndParticipants(for archiveID: UUID) throws {
+        try deleteMessages(for: archiveID)
+        try deleteParticipants(for: archiveID)
+    }
+
+    private func deleteMessagesAndParticipantsForDeletion(for archiveID: UUID) async throws {
+        try await deleteMessagesForDeletion(for: archiveID)
+        try deleteParticipants(for: archiveID)
+    }
+
+    private func deleteMessages(for archiveID: UUID) throws {
+        while true {
+            var descriptor = FetchDescriptor<ChatMessage>(
+                predicate: #Predicate<ChatMessage> { message in
+                    message.chatArchive?.id == archiveID
+                }
+            )
+            descriptor.fetchLimit = Self.messageBatchSize
+            let messages = try modelContext.fetch(descriptor)
+            guard !messages.isEmpty else { return }
+            for message in messages {
+                modelContext.delete(message)
+            }
+            try modelContext.save()
+        }
+    }
+
+    private func deleteMessagesForDeletion(for archiveID: UUID) async throws {
+        while true {
+            var descriptor = FetchDescriptor<ChatMessage>(
+                predicate: #Predicate<ChatMessage> { message in
+                    message.chatArchive?.id == archiveID
+                }
+            )
+            descriptor.fetchLimit = Self.deletionBatchSize
+            let messages = try modelContext.fetch(descriptor)
+            guard !messages.isEmpty else { return }
+            for message in messages {
+                modelContext.delete(message)
+            }
+            try modelContext.save()
+            await Task.yield()
+        }
+    }
+
+    private func deleteParticipants(for archiveID: UUID) throws {
+        let descriptor = FetchDescriptor<ChatParticipant>(
+            predicate: #Predicate<ChatParticipant> { participant in
+                participant.chatArchive?.id == archiveID
+            }
+        )
+        for participant in try modelContext.fetch(descriptor) {
+            modelContext.delete(participant)
+        }
     }
 
     private static func parsedMessage(from message: ChatMessage) -> ParsedMessage {
@@ -406,6 +571,15 @@ public final class ChatStore {
             mediaFileName: message.mediaFileName,
             mediaType: message.mediaType,
             rawText: message.rawText
+        )
+    }
+
+    private static func indexedMessage(from message: ChatMessage) -> MessageSearchIndex.IndexedMessage {
+        MessageSearchIndex.IndexedMessage(
+            id: message.id,
+            body: message.body,
+            senderName: message.senderName,
+            timestamp: message.timestamp
         )
     }
 

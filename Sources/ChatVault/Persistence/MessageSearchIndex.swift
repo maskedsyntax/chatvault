@@ -51,30 +51,39 @@ public final class MessageSearchIndex {
         messages: [IndexedMessage]
     ) throws {
         try openDatabaseIfNeeded()
-        try deleteIndex(for: archiveID)
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
 
-        let insertSQL = """
-        INSERT INTO message_fts (message_id, archive_id, body, sender_name)
-        VALUES (?, ?, ?, ?);
-        """
-        var insertStatement: OpaquePointer?
-        defer { sqlite3_finalize(insertStatement) }
-        guard sqlite3_prepare_v2(db, insertSQL, -1, &insertStatement, nil) == SQLITE_OK else {
-            throw SearchIndexError.prepareFailed(lastError)
-        }
+        do {
+            try deleteIndex(for: archiveID)
 
-        for message in messages {
-            sqlite3_bind_text(insertStatement, 1, message.id.uuidString, -1, Self.transientDestructor)
-            sqlite3_bind_text(insertStatement, 2, archiveID.uuidString, -1, Self.transientDestructor)
-            sqlite3_bind_text(insertStatement, 3, message.body, -1, Self.transientDestructor)
-            sqlite3_bind_text(insertStatement, 4, message.senderName ?? "", -1, Self.transientDestructor)
-            guard sqlite3_step(insertStatement) == SQLITE_DONE else {
-                throw SearchIndexError.insertFailed(lastError)
+            let insertSQL = """
+            INSERT INTO message_fts (message_id, archive_id, body, sender_name)
+            VALUES (?, ?, ?, ?);
+            """
+            var insertStatement: OpaquePointer?
+            defer { sqlite3_finalize(insertStatement) }
+            guard sqlite3_prepare_v2(db, insertSQL, -1, &insertStatement, nil) == SQLITE_OK else {
+                throw SearchIndexError.prepareFailed(lastError)
             }
-            sqlite3_reset(insertStatement)
-        }
 
-        try rebuildMessageDays(archiveID: archiveID, messages: messages)
+            for message in messages {
+                sqlite3_bind_text(insertStatement, 1, message.id.uuidString, -1, Self.transientDestructor)
+                sqlite3_bind_text(insertStatement, 2, archiveID.uuidString, -1, Self.transientDestructor)
+                sqlite3_bind_text(insertStatement, 3, message.body, -1, Self.transientDestructor)
+                sqlite3_bind_text(insertStatement, 4, message.senderName ?? "", -1, Self.transientDestructor)
+                guard sqlite3_step(insertStatement) == SQLITE_DONE else {
+                    throw SearchIndexError.insertFailed(lastError)
+                }
+                sqlite3_reset(insertStatement)
+                sqlite3_clear_bindings(insertStatement)
+            }
+
+            try rebuildMessageDays(archiveID: archiveID, messages: messages)
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
     }
 
     public func deleteIndex(for archiveID: UUID) throws {
@@ -147,12 +156,17 @@ public final class MessageSearchIndex {
 
     private func rebuildMessageDays(archiveID: UUID, messages: [IndexedMessage]) throws {
         let calendar = Calendar.current
+        let dayFormatter = DateFormatter()
+        dayFormatter.calendar = Calendar(identifier: .gregorian)
+        dayFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dayFormatter.dateFormat = "yyyy-MM-dd"
+
         var grouped: [String: (date: Date, firstID: UUID, count: Int)] = [:]
 
         for message in messages {
             guard let timestamp = message.timestamp else { continue }
             let day = calendar.startOfDay(for: timestamp)
-            let key = MessageDaySummary.dayKey(for: day)
+            let key = dayFormatter.string(from: day)
             if var existing = grouped[key] {
                 existing.count += 1
                 grouped[key] = existing

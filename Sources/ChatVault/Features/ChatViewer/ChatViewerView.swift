@@ -50,10 +50,9 @@ final class MessageScrollCoordinator {
 
 struct ChatViewerView: View {
     let archive: ChatArchive
-    @Binding var selectedArchive: ChatArchive?
+    @Binding var selectedArchiveID: UUID?
 
     @Environment(\.chatStore) private var chatStore
-    @Query private var archiveMessages: [ChatMessage]
 
     @State private var searchText: String = ""
     @State private var showArchiveDetails = false
@@ -62,30 +61,17 @@ struct ChatViewerView: View {
     @State private var scrollCoordinator = MessageScrollCoordinator()
     @State private var showDateJump = false
     @State private var messageDays: [MessageDaySummary] = []
+    @State private var chatLayout: ChatLayout?
+    @State private var linkedMessagesByFileName: [String: ChatMessage] = [:]
 
-    init(archive: ChatArchive, selectedArchive: Binding<ChatArchive?>) {
+    init(archive: ChatArchive, selectedArchiveID: Binding<UUID?>) {
         self.archive = archive
-        self._selectedArchive = selectedArchive
-
-        let archiveId = archive.id
-        self._archiveMessages = Query(
-            filter: #Predicate<ChatMessage> { message in
-                message.chatArchive?.id == archiveId
-            },
-            sort: \ChatMessage.sequenceIndex,
-            order: .forward
-        )
+        self._selectedArchiveID = selectedArchiveID
+        self._chatLayout = State(initialValue: ChatLayout(archive: archive))
     }
 
-    private var chatLayout: ChatLayout {
-        ChatLayout(archive: archive)
-    }
-
-    private var linkedMessagesByFileName: [String: ChatMessage] {
-        Dictionary(uniqueKeysWithValues: archiveMessages.compactMap { message in
-            guard let fileName = message.mediaFileName else { return nil }
-            return (fileName, message)
-        })
+    private var resolvedChatLayout: ChatLayout {
+        chatLayout ?? ChatLayout(archive: archive)
     }
 
     private var hasMediaLibrary: Bool {
@@ -96,7 +82,7 @@ struct ChatViewerView: View {
         MessageListView(
             archive: archive,
             searchText: searchText,
-            chatLayout: chatLayout,
+            chatLayout: resolvedChatLayout,
             highlightedMessageID: highlightedMessageID,
             scrollCoordinator: scrollCoordinator,
             onHighlight: { id in
@@ -184,8 +170,12 @@ struct ChatViewerView: View {
             }
         }
         .inspectorColumnWidth(min: 240, ideal: 280, max: 360)
+        .onChange(of: archive.id) { _, _ in
+            showMediaInspector = false
+            linkedMessagesByFileName = [:]
+        }
         .sheet(isPresented: $showArchiveDetails) {
-            ArchiveDetailsView(archive: archive, selectedArchive: $selectedArchive)
+            ArchiveDetailsView(archive: archive, selectedArchiveID: $selectedArchiveID)
         }
         .sheet(isPresented: $showDateJump) {
             DateJumpView(days: messageDays) { day in
@@ -198,9 +188,12 @@ struct ChatViewerView: View {
         }
         .task(id: archive.id) {
             if let chatStore {
-                try? chatStore.rebuildSearchIndexIfNeeded(for: archive)
                 messageDays = (try? chatStore.messageDays(for: archive)) ?? []
             }
+        }
+        .task(id: "\(archive.id)-\(showMediaInspector)") {
+            guard showMediaInspector, let chatStore else { return }
+            linkedMessagesByFileName = (try? chatStore.mediaLinkedMessages(for: archive)) ?? [:]
         }
         .onChange(of: searchText) { _, newValue in
             scrollCoordinator.isSearching = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -220,14 +213,11 @@ struct ChatViewerView: View {
 }
 
 struct ChatLayout {
-    let archive: ChatArchive
     let isGroupChat: Bool
     let rightAlignedSender: String?
     private let displayNames: [String: String]
 
     init(archive: ChatArchive) {
-        self.archive = archive
-
         if !archive.participantRecords.isEmpty {
             isGroupChat = archive.isGroupChat
             rightAlignedSender = archive.myParticipant?.exportName
@@ -278,6 +268,8 @@ struct MessageSection: Identifiable {
 }
 
 struct MessageListView: View {
+    private static let pageSize = 500
+
     let archive: ChatArchive
     let searchText: String
     let chatLayout: ChatLayout
@@ -285,15 +277,17 @@ struct MessageListView: View {
     let scrollCoordinator: MessageScrollCoordinator
     let onHighlight: (UUID) -> Void
 
-    @Query private var allMessages: [ChatMessage]
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.chatStore) private var chatStore
 
     @State private var hasScrolledToBottomOnAppear = false
     @State private var cachedSections: [MessageSection] = []
-    @State private var filteredMessages: [ChatMessage] = []
-    @State private var searchMatchIDs: Set<UUID>?
+    @State private var loadedMessages: [ChatMessage] = []
+    @State private var visibleMessages: [ChatMessage] = []
+    @State private var loadedSearchIDs: [UUID] = []
     @State private var searchTask: Task<Void, Never>?
+    @State private var isLoadingMessages = false
+    @State private var canLoadEarlier = false
 
     init(
         archive: ChatArchive,
@@ -309,21 +303,12 @@ struct MessageListView: View {
         self.highlightedMessageID = highlightedMessageID
         self.scrollCoordinator = scrollCoordinator
         self.onHighlight = onHighlight
-
-        let archiveId = archive.id
-        self._allMessages = Query(
-            filter: #Predicate<ChatMessage> { message in
-                message.chatArchive?.id == archiveId
-            },
-            sort: \ChatMessage.sequenceIndex,
-            order: .forward
-        )
     }
 
     var body: some View {
         ScrollViewReader { proxy in
             Group {
-                if filteredMessages.isEmpty && !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if visibleMessages.isEmpty && !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     EmptyStateView(
                         symbol: "magnifyingglass",
                         title: "No Results",
@@ -331,6 +316,31 @@ struct MessageListView: View {
                     )
                 } else {
                     List {
+                        if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                           canLoadEarlier {
+                            Section {
+                                Button {
+                                    loadEarlierMessages()
+                                } label: {
+                                    HStack {
+                                        Spacer()
+                                        if isLoadingMessages {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                        }
+                                        Text(isLoadingMessages ? "Loading earlier..." : "Load Earlier")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(isLoadingMessages)
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
+                            }
+                        }
+
                         ForEach(cachedSections) { section in
                             Section {
                                 ForEach(section.messages) { message in
@@ -370,10 +380,10 @@ struct MessageListView: View {
             }
             .background(ChatVaultTheme.chatBackground(for: colorScheme))
             .onAppear {
-                rebuildCache()
+                loadInitialMessages()
                 scrollCoordinator.register(
                     scrollToTop: {
-                        if let first = filteredMessages.first {
+                        if let first = visibleMessages.first {
                             proxy.scrollTo(first.id, anchor: .top)
                         }
                     },
@@ -381,18 +391,21 @@ struct MessageListView: View {
                         proxy.scrollTo("chat-bottom", anchor: .bottom)
                     },
                     scrollToMessage: { id in
-                        proxy.scrollTo(id, anchor: .center)
+                        if visibleMessages.contains(where: { $0.id == id }) {
+                            proxy.scrollTo(id, anchor: .center)
+                        } else {
+                            loadWindow(containing: id)
+                            Task { @MainActor in
+                                try? await Task.sleep(for: .milliseconds(50))
+                                proxy.scrollTo(id, anchor: .center)
+                            }
+                        }
                     }
                 )
-                scrollCoordinator.messageCount = allMessages.count
+                scrollCoordinator.messageCount = archive.messageCount
                 scrollCoordinator.isSearching = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                scrollCoordinator.updateSearchResults(filteredMessages.map(\.id))
+                scrollCoordinator.updateSearchResults(visibleMessages.map(\.id))
                 scrollToBottomIfNeeded(proxy: proxy)
-            }
-            .onChange(of: allMessages.count) { _, _ in
-                rebuildCache()
-                scrollCoordinator.messageCount = allMessages.count
-                scrollCoordinator.updateSearchResults(filteredMessages.map(\.id))
             }
             .onChange(of: cachedSections.count) { _, _ in
                 scrollToBottomIfNeeded(proxy: proxy)
@@ -404,27 +417,89 @@ struct MessageListView: View {
                     hasScrolledToBottomOnAppear = true
                 }
                 if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    visibleMessages = loadedMessages
+                    cachedSections = Self.buildSections(from: visibleMessages)
+                    scrollCoordinator.updateSearchResults(visibleMessages.map(\.id))
                     proxy.scrollTo("chat-bottom", anchor: .bottom)
                 }
             }
             .onChange(of: archive.id) { _, _ in
                 hasScrolledToBottomOnAppear = false
-                rebuildCache()
+                loadedMessages = []
+                visibleMessages = []
+                cachedSections = []
+                loadedSearchIDs = []
+                loadInitialMessages()
                 scrollToBottomIfNeeded(proxy: proxy)
             }
         }
     }
 
-    private func rebuildCache() {
-        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            filteredMessages = allMessages
-        } else if let searchMatchIDs {
-            filteredMessages = allMessages.filter { searchMatchIDs.contains($0.id) }
-        } else {
-            filteredMessages = []
+    private func loadInitialMessages() {
+        guard loadedMessages.isEmpty, !isLoadingMessages, let chatStore else { return }
+        isLoadingMessages = true
+        do {
+            loadedMessages = try chatStore.recentMessages(for: archive, limit: Self.pageSize)
+            visibleMessages = loadedMessages
+            cachedSections = Self.buildSections(from: visibleMessages)
+            canLoadEarlier = (loadedMessages.first?.sequenceIndex ?? 0) > 0
+            scrollCoordinator.messageCount = archive.messageCount
+            scrollCoordinator.updateSearchResults(visibleMessages.map(\.id))
+        } catch {
+            loadedMessages = []
+            visibleMessages = []
+            cachedSections = []
+            canLoadEarlier = false
         }
-        cachedSections = Self.buildSections(from: filteredMessages)
+        isLoadingMessages = false
+    }
+
+    private func loadWindow(containing messageID: UUID) {
+        guard !isLoadingMessages, let chatStore else { return }
+        isLoadingMessages = true
+        do {
+            let window = try chatStore.messageWindow(
+                archive: archive,
+                containing: messageID,
+                radius: Self.pageSize / 2
+            )
+            if !window.isEmpty {
+                loadedMessages = window
+                visibleMessages = window
+                cachedSections = Self.buildSections(from: visibleMessages)
+                canLoadEarlier = (loadedMessages.first?.sequenceIndex ?? 0) > 0
+                scrollCoordinator.updateSearchResults(visibleMessages.map(\.id))
+                hasScrolledToBottomOnAppear = true
+            }
+        } catch {
+            // Keep the current page if a jump target cannot be loaded.
+        }
+        isLoadingMessages = false
+    }
+
+    private func loadEarlierMessages() {
+        guard !isLoadingMessages,
+              searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let firstIndex = loadedMessages.first?.sequenceIndex,
+              firstIndex > 0,
+              let chatStore else { return }
+
+        isLoadingMessages = true
+        do {
+            let earlier = try chatStore.messagesBefore(
+                archive: archive,
+                sequenceIndex: firstIndex,
+                limit: Self.pageSize
+            )
+            loadedMessages.insert(contentsOf: earlier, at: 0)
+            visibleMessages = loadedMessages
+            cachedSections = Self.buildSections(from: visibleMessages)
+            canLoadEarlier = (loadedMessages.first?.sequenceIndex ?? 0) > 0
+            scrollCoordinator.updateSearchResults(visibleMessages.map(\.id))
+        } catch {
+            canLoadEarlier = false
+        }
+        isLoadingMessages = false
     }
 
     private func scheduleSearch(for query: String) {
@@ -432,9 +507,10 @@ struct MessageListView: View {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if trimmed.isEmpty {
-            searchMatchIDs = nil
-            rebuildCache()
-            scrollCoordinator.updateSearchResults(filteredMessages.map(\.id))
+            loadedSearchIDs = []
+            visibleMessages = loadedMessages
+            cachedSections = Self.buildSections(from: visibleMessages)
+            scrollCoordinator.updateSearchResults(visibleMessages.map(\.id))
             return
         }
 
@@ -445,26 +521,25 @@ struct MessageListView: View {
             if let chatStore {
                 if let ids = try? chatStore.searchMessages(in: archive, query: trimmed) {
                     guard !Task.isCancelled else { return }
-                    searchMatchIDs = Set(ids)
+                    loadedSearchIDs = ids
+                    visibleMessages = (try? chatStore.messages(matching: ids, in: archive)) ?? []
                 } else {
-                    searchMatchIDs = Set(
-                        allMessages.filter {
+                    visibleMessages = loadedMessages.filter {
                             $0.body.localizedStandardContains(trimmed) ||
                             ($0.senderName?.localizedStandardContains(trimmed) ?? false)
-                        }.map(\.id)
-                    )
+                    }
+                    loadedSearchIDs = visibleMessages.map(\.id)
                 }
             } else {
-                searchMatchIDs = Set(
-                    allMessages.filter {
+                visibleMessages = loadedMessages.filter {
                         $0.body.localizedStandardContains(trimmed) ||
                         ($0.senderName?.localizedStandardContains(trimmed) ?? false)
-                    }.map(\.id)
-                )
+                }
+                loadedSearchIDs = visibleMessages.map(\.id)
             }
 
-            rebuildCache()
-            scrollCoordinator.updateSearchResults(filteredMessages.map(\.id))
+            cachedSections = Self.buildSections(from: visibleMessages)
+            scrollCoordinator.updateSearchResults(loadedSearchIDs)
         }
     }
 
@@ -505,7 +580,7 @@ struct MessageListView: View {
     private func scrollToBottomIfNeeded(proxy: ScrollViewProxy) {
         guard searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !hasScrolledToBottomOnAppear,
-              !filteredMessages.isEmpty else { return }
+              !visibleMessages.isEmpty else { return }
 
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(50))

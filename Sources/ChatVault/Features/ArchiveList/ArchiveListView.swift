@@ -7,7 +7,7 @@ struct ArchiveListView: View {
     @Environment(\.chatStore) private var chatStore
 
     @Query(sort: \ChatArchive.importedAt, order: .reverse) private var archives: [ChatArchive]
-    @Binding var selectedArchive: ChatArchive?
+    @Binding var selectedArchiveID: UUID?
 
     @State private var isImporting = false
     @State private var importError: Error?
@@ -15,7 +15,8 @@ struct ArchiveListView: View {
     @State private var isDropTargeted = false
 
     @State private var currentImport: ChatStore.ParsedImport?
-    @State private var importQueue: [ChatStore.ParsedImport] = []
+    @State private var importURLQueue: [URL] = []
+    @State private var importSessionURLs: [URL] = []
     @State private var importMode: ImportPreviewMode = .newImport
     @State private var pendingDuplicate: ChatArchive?
     @State private var shouldCleanupImportOnSheetDismiss = true
@@ -27,15 +28,20 @@ struct ArchiveListView: View {
 
     @State private var archiveToDelete: ChatArchive?
     @State private var showDeleteConfirmation = false
+    @State private var pendingDeletionIDs = Set<UUID>()
+
+    private var visibleArchives: [ChatArchive] {
+        archives.filter { !pendingDeletionIDs.contains($0.id) }
+    }
 
     var body: some View {
         Group {
-            if archives.isEmpty {
+            if visibleArchives.isEmpty {
                 EmptyArchivesView { isImporting = true }
             } else {
-                List(selection: $selectedArchive) {
-                    ForEach(archives) { archive in
-                        NavigationLink(value: archive) {
+                List(selection: $selectedArchiveID) {
+                    ForEach(visibleArchives) { archive in
+                        NavigationLink(value: archive.id) {
                             ArchiveRowView(
                                 archive: archive,
                                 lastMessagePreview: archive.lastMessagePreview(in: modelContext)
@@ -70,11 +76,13 @@ struct ArchiveListView: View {
                 }
             }
 
-            if selectedArchive != nil {
+            if selectedArchiveID != nil {
                 ToolbarItem(placement: .automatic) {
                     Button(role: .destructive) {
-                        archiveToDelete = selectedArchive
-                        showDeleteConfirmation = true
+                        if let selectedArchiveID {
+                            archiveToDelete = visibleArchives.first(where: { $0.id == selectedArchiveID })
+                            showDeleteConfirmation = true
+                        }
                     } label: {
                         Label("Delete Chat", systemImage: "trash")
                     }
@@ -231,7 +239,7 @@ struct ArchiveListView: View {
     }
 
     private func importURLs(_ urls: [URL]) {
-        guard let store = chatStore else {
+        guard chatStore != nil else {
             importError = ImportBatchError.storeUnavailable
             showError = true
             return
@@ -245,43 +253,20 @@ struct ArchiveListView: View {
         parsingLabel = "Reading \(urls.count) file\(urls.count == 1 ? "" : "s")…"
 
         Task {
-            var localURLs: [URL] = []
             defer {
                 for (url, accessed) in scopedAccess where accessed {
                     url.stopAccessingSecurityScopedResource()
                 }
-                ImportFilePreparer.removeTemporaryDirectories(for: localURLs)
-                isParsingImports = false
             }
 
             do {
-                localURLs = try ImportFilePreparer.copyToTemporaryDirectory(urls: urls)
+                let localURLs = try ImportFilePreparer.copyToTemporaryDirectory(urls: urls)
+                beginImportSession(with: localURLs)
             } catch {
                 importError = error
                 showError = true
-                return
+                isParsingImports = false
             }
-
-            let result = await store.parseImports(from: localURLs)
-
-            if result.imports.isEmpty {
-                importError = result.errors.first?.1 ?? ChatStore.ImportError.fileUnreadable
-                showError = true
-                return
-            }
-
-            if !result.errors.isEmpty {
-                let failedNames = result.errors.map { $0.0.lastPathComponent }.joined(separator: ", ")
-                importError = ImportBatchError.partialFailure(
-                    imported: result.imports.count,
-                    failed: result.errors.count,
-                    failedNames: failedNames,
-                    underlying: result.errors.first?.1
-                )
-                showError = true
-            }
-
-            beginImportSession(with: result.imports)
         }
     }
 
@@ -293,48 +278,91 @@ struct ArchiveListView: View {
         cancelImportSession()
     }
 
-    private func beginImportSession(with imports: [ChatStore.ParsedImport]) {
-        guard let first = imports.first else { return }
-
-        importQueue = Array(imports.dropFirst())
-        currentImport = first
-        pendingDuplicate = chatStore?.findPossibleDuplicate(
-            sourceFileName: first.sourceFileName,
-            messageCount: first.parsed.messages.count
-        )
-        importMode = importQueue.isEmpty ? .newImport : .batch(remaining: importQueue.count)
+    private func beginImportSession(with urls: [URL]) {
+        importSessionURLs = urls
+        importURLQueue = urls
+        currentImport = nil
+        pendingDuplicate = nil
+        importMode = urls.count <= 1 ? .newImport : .batch(remaining: max(urls.count - 1, 0))
+        parseNextQueuedImport()
     }
 
     private func handleImportComplete(_ archive: ChatArchive) {
-        selectedArchive = archive
         currentImport?.cleanupTemporaryFiles()
 
-        if importQueue.isEmpty {
+        shouldCleanupImportOnSheetDismiss = false
+        currentImport = nil
+        pendingDuplicate = nil
+
+        if importURLQueue.isEmpty {
+            selectedArchiveID = archive.id
             shouldCleanupImportOnSheetDismiss = false
-            currentImport = nil
-            pendingDuplicate = nil
+            cleanupImportSessionFiles()
             importMode = .newImport
             return
         }
 
-        let next = importQueue.removeFirst()
-        currentImport = next
-        pendingDuplicate = chatStore?.findPossibleDuplicate(
-            sourceFileName: next.sourceFileName,
-            messageCount: next.parsed.messages.count
-        )
-        importMode = importQueue.isEmpty ? .newImport : .batch(remaining: importQueue.count)
+        parseNextQueuedImport()
     }
 
     private func cancelImportSession() {
         currentImport?.cleanupTemporaryFiles()
-        for item in importQueue {
-            item.cleanupTemporaryFiles()
-        }
         currentImport = nil
-        importQueue = []
+        importURLQueue = []
+        cleanupImportSessionFiles()
         pendingDuplicate = nil
         importMode = .newImport
+    }
+
+    private func parseNextQueuedImport() {
+        guard let store = chatStore else {
+            importError = ImportBatchError.storeUnavailable
+            showError = true
+            cancelImportSession()
+            return
+        }
+        guard currentImport == nil else { return }
+        guard !importURLQueue.isEmpty else {
+            cleanupImportSessionFiles()
+            importMode = .newImport
+            return
+        }
+
+        let url = importURLQueue.removeFirst()
+        isParsingImports = true
+        parsingLabel = "Reading \(url.lastPathComponent)…"
+
+        Task {
+            let result = await store.parseImports(from: [url])
+            isParsingImports = false
+
+            if let parsedImport = result.imports.first {
+                currentImport = parsedImport
+                pendingDuplicate = chatStore?.findPossibleDuplicate(
+                    sourceFileName: parsedImport.sourceFileName,
+                    messageCount: parsedImport.parsed.messages.count
+                )
+                importMode = importURLQueue.isEmpty ? .newImport : .batch(remaining: importURLQueue.count)
+                return
+            }
+
+            if let error = result.errors.first?.1 {
+                importError = error
+                showError = true
+            }
+
+            if importURLQueue.isEmpty {
+                cleanupImportSessionFiles()
+                importMode = .newImport
+            } else {
+                parseNextQueuedImport()
+            }
+        }
+    }
+
+    private func cleanupImportSessionFiles() {
+        ImportFilePreparer.removeTemporaryDirectories(for: importSessionURLs)
+        importSessionURLs = []
     }
 
     private func renameArchive() {
@@ -348,18 +376,18 @@ struct ArchiveListView: View {
 
     private func requestDeleteAtOffsets(_ offsets: IndexSet) {
         guard let index = offsets.first else { return }
-        archiveToDelete = archives[index]
+        archiveToDelete = visibleArchives[index]
         showDeleteConfirmation = true
     }
 
     private func deleteArchive(_ archive: ChatArchive) {
-        if selectedArchive?.id == archive.id {
-            selectedArchive = nil
+        let archiveID = archive.id
+        pendingDeletionIDs.insert(archiveID)
+        chatStore?.scheduleArchiveDeletion(id: archiveID) {
+            if selectedArchiveID == archiveID {
+                selectedArchiveID = nil
+            }
         }
-        chatStore?.deleteArchiveFiles(for: archive)
-        try? chatStore?.deleteSearchIndex(for: archive)
-        modelContext.delete(archive)
-        try? modelContext.save()
     }
 }
 

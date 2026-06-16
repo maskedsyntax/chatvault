@@ -15,6 +15,7 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QProgressBar>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QTextEdit>
 #include <QToolBar>
@@ -125,6 +126,7 @@ void MainWindow::refreshArchives() {
     db.initialize();
     archives_ = db.archives();
 
+    const QSignalBlocker blocker(archiveList_);
     archiveList_->clear();
     for (const ArchiveRow &archive : archives_) {
         const QString subtitle = QString("%1 messages%2\n%3")
@@ -169,7 +171,14 @@ void MainWindow::loadArchive(const QString &archiveId) {
     connect(watcher, &QFutureWatcher<QVector<MessageRow>>::finished, this, [this, watcher, archiveId] {
         watcher->deleteLater();
         if (archiveId != currentArchiveId_) return;
-        const QVector<MessageRow> rows = watcher->result();
+        QVector<MessageRow> rows;
+        try {
+            rows = watcher->result();
+        } catch (const std::exception &error) {
+            clearBusy("Failed to load chat");
+            QMessageBox::warning(this, "Load Failed", error.what());
+            return;
+        }
         messageModel_->setMessages(rows);
         canLoadEarlier_ = !rows.isEmpty() && rows.first().sequenceIndex > 0;
         loadEarlierButton_->setEnabled(canLoadEarlier_);
@@ -193,7 +202,14 @@ void MainWindow::loadEarlier() {
     auto *watcher = new QFutureWatcher<QVector<MessageRow>>(this);
     connect(watcher, &QFutureWatcher<QVector<MessageRow>>::finished, this, [this, watcher] {
         watcher->deleteLater();
-        const QVector<MessageRow> rows = watcher->result();
+        QVector<MessageRow> rows;
+        try {
+            rows = watcher->result();
+        } catch (const std::exception &error) {
+            clearBusy("Failed to load earlier messages");
+            QMessageBox::warning(this, "Load Failed", error.what());
+            return;
+        }
         messageModel_->prependMessages(rows);
         canLoadEarlier_ = !messageModel_->messages().isEmpty() && messageModel_->messages().first().sequenceIndex > 0;
         loadEarlierButton_->setEnabled(canLoadEarlier_);
@@ -218,7 +234,14 @@ void MainWindow::searchMessages(const QString &query) {
     auto *watcher = new QFutureWatcher<QVector<MessageRow>>(this);
     connect(watcher, &QFutureWatcher<QVector<MessageRow>>::finished, this, [this, watcher] {
         watcher->deleteLater();
-        const QVector<MessageRow> rows = watcher->result();
+        QVector<MessageRow> rows;
+        try {
+            rows = watcher->result();
+        } catch (const std::exception &error) {
+            clearBusy("Search failed");
+            QMessageBox::warning(this, "Search Failed", error.what());
+            return;
+        }
         messageModel_->setMessages(rows);
         loadEarlierButton_->setEnabled(false);
         clearBusy(QString("Found %1 messages").arg(rows.size()));
@@ -247,7 +270,12 @@ void MainWindow::importFiles() {
     connect(watcher, &QFutureWatcher<QStringList>::finished, this, [this, watcher] {
         watcher->deleteLater();
         importButton_->setEnabled(true);
-        const QStringList errors = watcher->result();
+        QStringList errors;
+        try {
+            errors = watcher->result();
+        } catch (const std::exception &error) {
+            errors << error.what();
+        }
         refreshArchives();
         clearBusy(errors.isEmpty() ? "Import complete" : "Import completed with errors");
         if (!errors.isEmpty()) {
@@ -289,7 +317,12 @@ void MainWindow::deleteCurrentArchive() {
     auto *watcher = new QFutureWatcher<QString>(this);
     connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher] {
         watcher->deleteLater();
-        const QString error = watcher->result();
+        QString error;
+        try {
+            error = watcher->result();
+        } catch (const std::exception &exception) {
+            error = exception.what();
+        }
         refreshArchives();
         clearBusy(error.isEmpty() ? "Deleted chat" : "Delete failed");
         if (!error.isEmpty()) QMessageBox::warning(this, "Delete Failed", error);

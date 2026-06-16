@@ -31,10 +31,10 @@ ZIP imports keep extracted media in the app data folder. Images render inline as
 
 ## Data
 
-The Qt app stores its database separately from the previous Swift app:
+The Qt app stores its database separately from the previous Swift app, under the current macOS user's Application Support directory:
 
 ```text
-~/Library/Application Support/MaskedSyntax/ChatVaultQt/chatvault.sqlite3
+$HOME/Library/Application Support/MaskedSyntax/ChatVaultQt/chatvault.sqlite3
 ```
 
 ## Features

@@ -1,6 +1,19 @@
+<div align="center">
+
+<img src="logo.png" alt="ChatVault logo" width="128" />
+
 # ChatVault
 
-Personal WhatsApp export viewer for macOS. All data stays local on your device.
+**A local-first WhatsApp export viewer for macOS.** Import `.txt` or `.zip` chats, browse messages in a familiar UI, search history, and inspect media — all without leaving your Mac.
+
+<br />
+
+![macOS 14+](https://img.shields.io/badge/macOS-14%2B-007AFF?logo=apple&logoColor=white)
+![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-macOS-lightgrey?logo=apple)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+</div>
 
 ## Run the app
 
@@ -31,3 +44,11 @@ swift test
 4. Review the preview, confirm the title, and import
 
 ZIP exports are extracted locally. Images and videos appear inline in the chat; use the **Media Inspector** (photo toolbar button) to browse all attachments.
+
+## Features
+
+- WhatsApp-style chat bubbles with sent/received alignment
+- Batch import of multiple `.txt` / `.zip` exports
+- Full-text search, date jump, and media inspector
+- Participant names, birthday detection, and archive management
+- Delete chats from the sidebar with confirmation

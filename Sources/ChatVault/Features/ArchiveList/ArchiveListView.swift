@@ -51,6 +51,12 @@ struct ArchiveListView: View {
                                 showDeleteConfirmation = true
                             }
                         }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button("Delete", role: .destructive) {
+                                archiveToDelete = archive
+                                showDeleteConfirmation = true
+                            }
+                        }
                     }
                     .onDelete(perform: requestDeleteAtOffsets)
                 }
@@ -61,6 +67,18 @@ struct ArchiveListView: View {
             ToolbarItem(placement: .primaryAction) {
                 Button { isImporting = true } label: {
                     Label("Import Chat", systemImage: "plus")
+                }
+            }
+
+            if selectedArchive != nil {
+                ToolbarItem(placement: .automatic) {
+                    Button(role: .destructive) {
+                        archiveToDelete = selectedArchive
+                        showDeleteConfirmation = true
+                    } label: {
+                        Label("Delete Chat", systemImage: "trash")
+                    }
+                    .help("Delete the selected chat")
                 }
             }
         }

@@ -358,6 +358,7 @@ struct MessageListView: View {
                         Section {
                             Color.clear
                                 .frame(height: 24)
+                                .id("chat-bottom")
                                 .listRowSeparator(.hidden)
                                 .listRowInsets(EdgeInsets())
                                 .listRowBackground(Color.clear)
@@ -377,9 +378,7 @@ struct MessageListView: View {
                         }
                     },
                     scrollToBottom: {
-                        if let last = filteredMessages.last {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
+                        proxy.scrollTo("chat-bottom", anchor: .bottom)
                     },
                     scrollToMessage: { id in
                         proxy.scrollTo(id, anchor: .center)
@@ -395,14 +394,17 @@ struct MessageListView: View {
                 scrollCoordinator.messageCount = allMessages.count
                 scrollCoordinator.updateSearchResults(filteredMessages.map(\.id))
             }
+            .onChange(of: cachedSections.count) { _, _ in
+                scrollToBottomIfNeeded(proxy: proxy)
+            }
             .onChange(of: searchText) { oldValue, newValue in
                 scheduleSearch(for: newValue)
                 scrollCoordinator.isSearching = !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 if oldValue.isEmpty && !newValue.isEmpty {
                     hasScrolledToBottomOnAppear = true
                 }
-                if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let lastMessage = allMessages.last {
-                    proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    proxy.scrollTo("chat-bottom", anchor: .bottom)
                 }
             }
             .onChange(of: archive.id) { _, _ in
@@ -503,9 +505,13 @@ struct MessageListView: View {
     private func scrollToBottomIfNeeded(proxy: ScrollViewProxy) {
         guard searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !hasScrolledToBottomOnAppear,
-              let lastMessage = allMessages.last else { return }
-        proxy.scrollTo(lastMessage.id, anchor: .bottom)
-        hasScrolledToBottomOnAppear = true
+              !filteredMessages.isEmpty else { return }
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(50))
+            proxy.scrollTo("chat-bottom", anchor: .bottom)
+            hasScrolledToBottomOnAppear = true
+        }
     }
 }
 
